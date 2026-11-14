@@ -1,0 +1,20 @@
+"""Shared paths and persistent-browser startup for FT tools."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+def app_data_dir() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ft-nioc-uploader"
+
+
+def launch_persistent_session(playwright, profile_dir: Path):
+    profile_dir = Path(profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    context = playwright.chromium.launch_persistent_context(
+        str(profile_dir), headless=False
+    )
+    page = context.pages[0] if context.pages else context.new_page()
+    return context, page
