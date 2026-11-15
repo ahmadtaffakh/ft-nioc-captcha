@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
+import tkinter as tk
+from tkinter import ttk
+
 from captcha_lab import CaptchaLabApp
 from ft_runtime import BrowserSession, capture_captcha_bytes
 
@@ -167,6 +170,46 @@ class CredentialPersistenceTest(unittest.TestCase):
             app._after_login("ورود قبلاً انجام شده است.")
 
         save.assert_not_called()
+
+
+class OrganizationalUiTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        with patch("captcha_lab.app_data_dir", return_value=Path(self.temporary.name)):
+            self.app = CaptchaLabApp(self.root)
+        self.root.update_idletasks()
+
+    def tearDown(self):
+        self.app.browser.executor.shutdown(wait=False, cancel_futures=True)
+        self.root.destroy()
+        self.temporary.cleanup()
+
+    def test_workflow_is_separated_into_named_tabs(self):
+        names = [self.app.notebook.tab(tab, "text").strip() for tab in self.app.notebook.tabs()]
+        self.assertEqual(
+            names,
+            ["اتصال و CAPTCHA", "داده و آموزش", "ورود سامانه", "خروجی و گزارش"],
+        )
+
+    def test_every_action_button_has_a_tooltip(self):
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+
+        buttons = [
+            widget
+            for widget in descendants(self.root)
+            if isinstance(widget, ttk.Button)
+        ]
+        self.assertGreaterEqual(len(buttons), 15)
+        self.assertTrue(all(getattr(button, "_tooltip_text", "") for button in buttons))
+
+    def test_log_uses_professional_dark_palette(self):
+        self.assertEqual(self.app.output.cget("background"), "#111827")
+        self.assertEqual(self.app.output.tag_cget("success", "foreground"), "#6CE9A6")
 
 
 if __name__ == "__main__":

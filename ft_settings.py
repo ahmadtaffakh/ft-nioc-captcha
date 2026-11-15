@@ -11,7 +11,7 @@ from pathlib import Path
 from ctypes import wintypes
 
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 SETTINGS_FILENAME = "settings.json"
 CREDENTIALS_FILENAME = "credentials.dat"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1

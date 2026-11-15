@@ -38,12 +38,80 @@ from ft_settings import (
 )
 
 
+COLORS = {
+    "background": "#F3F6FA",
+    "surface": "#FFFFFF",
+    "navy": "#17365D",
+    "primary": "#245A92",
+    "primary_active": "#1B4777",
+    "text": "#1F2937",
+    "muted": "#667085",
+    "border": "#D0D5DD",
+    "danger": "#B42318",
+    "danger_active": "#912018",
+    "log_background": "#111827",
+    "log_text": "#E5E7EB",
+}
+
+
+def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
+    """Attach a keyboard- and mouse-accessible tooltip to one Tk widget."""
+    tooltip = None
+    pending = None
+    widget._tooltip_text = text
+
+    def hide(_event=None):
+        nonlocal tooltip, pending
+        if pending is not None:
+            widget.after_cancel(pending)
+            pending = None
+        if tooltip is not None:
+            tooltip.destroy()
+            tooltip = None
+
+    def show():
+        nonlocal tooltip, pending
+        pending = None
+        if tooltip is not None or not widget.winfo_exists():
+            return
+        tooltip = tk.Toplevel(widget)
+        tooltip.wm_overrideredirect(True)
+        tooltip.wm_attributes("-topmost", True)
+        x = widget.winfo_rootx() + widget.winfo_width() - 12
+        y = widget.winfo_rooty() + widget.winfo_height() + 6
+        tooltip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tooltip,
+            text=text,
+            justify="right",
+            background="#FFF8D6",
+            foreground=COLORS["text"],
+            relief="solid",
+            borderwidth=1,
+            padx=8,
+            pady=5,
+            font=("Tahoma", 9),
+            wraplength=360,
+        ).pack()
+
+    def schedule(_event=None):
+        nonlocal pending
+        hide()
+        pending = widget.after(delay_ms, show)
+
+    widget.bind("<Enter>", schedule, add="+")
+    widget.bind("<Leave>", hide, add="+")
+    widget.bind("<FocusIn>", schedule, add="+")
+    widget.bind("<FocusOut>", hide, add="+")
+    widget.bind("<ButtonPress>", hide, add="+")
+
+
 class CaptchaLabApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"آزمایشگاه CAPTCHA سامانه FT — نسخه {APP_VERSION}")
-        self.root.geometry("920x860")
-        self.root.minsize(820, 720)
+        self.root.geometry("980x720")
+        self.root.minsize(860, 640)
         self.base_dir = app_data_dir()
         self.dataset_dir = self.base_dir / "captcha-data"
         self.batch_root = self.base_dir / "captcha-batches"
@@ -95,125 +163,457 @@ class CaptchaLabApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
-        container = ttk.Frame(self.root, padding=14)
+        self._configure_styles()
+        container = ttk.Frame(self.root, padding=(18, 14, 18, 10))
         container.pack(fill="both", expand=True)
 
-        browser = ttk.LabelFrame(container, text="۱) دریافت تصویر از سامانه", padding=10)
-        browser.pack(fill="x")
-        ttk.Label(browser, text="Selector تصویر:").grid(row=0, column=0, sticky="e")
-        ttk.Entry(browser, textvariable=self.selector, width=70).grid(
-            row=0, column=1, columnspan=3, sticky="ew", padx=6
+        header = ttk.Frame(container, style="Header.TFrame", padding=(16, 12))
+        header.pack(fill="x", pady=(0, 12))
+        title_group = ttk.Frame(header, style="Header.TFrame")
+        title_group.pack(side="right", fill="x", expand=True)
+        ttk.Label(
+            title_group,
+            text="سامانه سازمانی مدیریت CAPTCHA و انتقال فایل FT",
+            style="HeaderTitle.TLabel",
+            anchor="e",
+        ).pack(fill="x")
+        ttk.Label(
+            title_group,
+            text="محیط کنترل، آموزش و آزمون ورود به سامانه",
+            style="HeaderSubtitle.TLabel",
+            anchor="e",
+        ).pack(fill="x", pady=(3, 0))
+        ttk.Label(
+            header,
+            text=f"نسخه {APP_VERSION}",
+            style="VersionBadge.TLabel",
+        ).pack(side="left", padx=(0, 12))
+
+        self.notebook = ttk.Notebook(container)
+        self.notebook.pack(fill="both", expand=True)
+        self.browser_tab = ttk.Frame(self.notebook, padding=16)
+        self.data_tab = ttk.Frame(self.notebook, padding=16)
+        self.login_tab = ttk.Frame(self.notebook, padding=16)
+        self.output_tab = ttk.Frame(self.notebook, padding=16)
+        self.notebook.add(self.browser_tab, text="  اتصال و CAPTCHA  ")
+        self.notebook.add(self.data_tab, text="  داده و آموزش  ")
+        self.notebook.add(self.login_tab, text="  ورود سامانه  ")
+        self.notebook.add(self.output_tab, text="  خروجی و گزارش  ")
+
+        self._build_browser_tab()
+        self._build_data_tab()
+        self._build_login_tab()
+        self._build_output_tab()
+
+        status_bar = ttk.Frame(container, style="StatusBar.TFrame", padding=(10, 7))
+        status_bar.pack(fill="x", pady=(10, 0))
+        ttk.Label(status_bar, text="وضعیت:", style="StatusTitle.TLabel").pack(side="right")
+        ttk.Label(
+            status_bar,
+            textvariable=self.status,
+            style="Status.TLabel",
+            anchor="e",
+        ).pack(side="right", padx=8)
+        ttk.Label(
+            status_bar,
+            text="FT Desktop Console",
+            style="StatusMuted.TLabel",
+        ).pack(side="left")
+
+    def _configure_styles(self):
+        self.root.configure(background=COLORS["background"])
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure(".", font=("Tahoma", 10), foreground=COLORS["text"])
+        style.configure("TFrame", background=COLORS["background"])
+        style.configure("TLabel", background=COLORS["background"], foreground=COLORS["text"])
+        style.configure("Header.TFrame", background=COLORS["navy"])
+        style.configure(
+            "HeaderTitle.TLabel",
+            background=COLORS["navy"],
+            foreground="#FFFFFF",
+            font=("Tahoma", 13, "bold"),
         )
-        ttk.Button(browser, text="بازکردن مرورگر", command=self._open_browser).grid(row=1, column=1, pady=8)
-        ttk.Button(browser, text="دریافت CAPTCHA", command=self._capture).grid(row=1, column=2, pady=8)
-        ttk.Button(browser, text="تازه‌سازی", command=self._refresh).grid(row=1, column=3, pady=8)
-        ttk.Label(browser, text="تعداد Batch:").grid(row=2, column=0, sticky="e")
-        ttk.Spinbox(browser, from_=1, to=10000, textvariable=self.batch_count, width=8).grid(
-            row=2, column=1, sticky="w", padx=6
+        style.configure(
+            "HeaderSubtitle.TLabel",
+            background=COLORS["navy"],
+            foreground="#D7E3F1",
+            font=("Tahoma", 9),
         )
-        ttk.Label(browser, text="تأخیر بعد از Reload (ثانیه):").grid(
-            row=2, column=2, sticky="e"
+        style.configure(
+            "VersionBadge.TLabel",
+            background="#DCE8F5",
+            foreground=COLORS["navy"],
+            font=("Tahoma", 9, "bold"),
+            padding=(10, 5),
         )
-        ttk.Spinbox(
-            browser,
+        style.configure(
+            "Card.TLabelframe",
+            background=COLORS["surface"],
+            bordercolor=COLORS["border"],
+            relief="solid",
+        )
+        style.configure(
+            "Card.TLabelframe.Label",
+            background=COLORS["surface"],
+            foreground=COLORS["navy"],
+            font=("Tahoma", 10, "bold"),
+        )
+        style.configure("Card.TLabel", background=COLORS["surface"])
+        style.configure(
+            "MutedCard.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["muted"],
+            font=("Tahoma", 9),
+        )
+        style.configure(
+            "Primary.TButton",
+            background=COLORS["primary"],
+            foreground="#FFFFFF",
+            font=("Tahoma", 9, "bold"),
+            padding=(14, 8),
+            borderwidth=0,
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("pressed", COLORS["primary_active"]), ("active", COLORS["primary_active"])],
+        )
+        style.configure(
+            "Secondary.TButton",
+            background="#E8EEF5",
+            foreground=COLORS["navy"],
+            font=("Tahoma", 9, "bold"),
+            padding=(12, 8),
+            borderwidth=0,
+        )
+        style.map("Secondary.TButton", background=[("active", "#D8E3EF")])
+        style.configure(
+            "Danger.TButton",
+            background="#FEE4E2",
+            foreground=COLORS["danger"],
+            font=("Tahoma", 9, "bold"),
+            padding=(12, 8),
+            borderwidth=0,
+        )
+        style.map("Danger.TButton", background=[("active", "#FECDCA")])
+        style.configure("TNotebook", background=COLORS["background"], borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            background="#E4EAF1",
+            foreground=COLORS["muted"],
+            font=("Tahoma", 10, "bold"),
+            padding=(18, 10),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", COLORS["surface"]), ("active", "#DCE6F0")],
+            foreground=[("selected", COLORS["navy"])],
+        )
+        style.configure("StatusBar.TFrame", background="#E8EEF5")
+        style.configure(
+            "StatusTitle.TLabel",
+            background="#E8EEF5",
+            foreground=COLORS["navy"],
+            font=("Tahoma", 9, "bold"),
+        )
+        style.configure("Status.TLabel", background="#E8EEF5", foreground=COLORS["text"])
+        style.configure(
+            "StatusMuted.TLabel", background="#E8EEF5", foreground=COLORS["muted"]
+        )
+
+    def _button(self, parent, text, command, tooltip, style="Secondary.TButton"):
+        button = ttk.Button(parent, text=text, command=command, style=style)
+        add_tooltip(button, tooltip)
+        return button
+
+    def _build_browser_tab(self):
+        connection = ttk.LabelFrame(
+            self.browser_tab, text="اتصال به سامانه", style="Card.TLabelframe", padding=18
+        )
+        connection.pack(fill="x")
+        ttk.Label(connection, text="Selector تصویر CAPTCHA", style="Card.TLabel").grid(
+            row=0, column=0, sticky="e", padx=(10, 0)
+        )
+        selector_entry = ttk.Entry(connection, textvariable=self.selector, justify="left")
+        selector_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=10, pady=6)
+        add_tooltip(selector_entry, "Selector عنصر تصویر CAPTCHA در صفحه ورود؛ در حالت عادی تغییر ندهید.")
+        self._button(
+            connection,
+            "بازکردن مرورگر",
+            self._open_browser,
+            "مرورگر اختصاصی را با پروفایل ماندگار باز می‌کند.",
+            "Primary.TButton",
+        ).grid(row=1, column=1, padx=5, pady=10, sticky="ew")
+        self._button(
+            connection,
+            "دریافت CAPTCHA",
+            self._capture,
+            "تصویر CAPTCHA فعلی را می‌خواند و در تب داده و آموزش نمایش می‌دهد.",
+        ).grid(row=1, column=2, padx=5, pady=10, sticky="ew")
+        self._button(
+            connection,
+            "تازه‌سازی صفحه",
+            self._refresh,
+            "صفحه ورود را Reload می‌کند تا CAPTCHA تازه ایجاد شود.",
+        ).grid(row=1, column=3, padx=5, pady=10, sticky="ew")
+        connection.columnconfigure(1, weight=2)
+        connection.columnconfigure(2, weight=1)
+        connection.columnconfigure(3, weight=1)
+
+        batch = ttk.LabelFrame(
+            self.browser_tab,
+            text="دریافت خودکار CAPTCHA",
+            style="Card.TLabelframe",
+            padding=18,
+        )
+        batch.pack(fill="x", pady=(14, 0))
+        ttk.Label(batch, text="تعداد تصاویر", style="Card.TLabel").grid(
+            row=0, column=0, sticky="e", padx=8
+        )
+        count_input = ttk.Spinbox(
+            batch, from_=1, to=10000, textvariable=self.batch_count, width=10, justify="center"
+        )
+        count_input.grid(row=0, column=1, sticky="w", padx=8, pady=8)
+        add_tooltip(count_input, "تعداد CAPTCHAهایی که در Batch جاری دریافت می‌شوند.")
+        ttk.Label(batch, text="تأخیر بعد از Reload (ثانیه)", style="Card.TLabel").grid(
+            row=0, column=2, sticky="e", padx=8
+        )
+        delay_input = ttk.Spinbox(
+            batch,
             from_=0,
             to=60,
             increment=0.5,
             textvariable=self.reload_delay_seconds,
-            width=8,
-        ).grid(row=2, column=3, sticky="w", padx=6)
-        ttk.Button(browser, text="دریافت خودکار", command=self._collect_batch).grid(
-            row=3, column=1, pady=4
+            width=10,
+            justify="center",
         )
-        ttk.Button(browser, text="توقف", command=self.browser.cancel_batch).grid(
-            row=3, column=2, pady=4
-        )
-        browser.columnconfigure(1, weight=1)
+        delay_input.grid(row=0, column=3, sticky="w", padx=8, pady=8)
+        add_tooltip(delay_input, "فاصله بین Reload صفحه و خواندن CAPTCHA بعدی؛ مقدار مجاز صفر تا ۶۰ ثانیه.")
+        self._button(
+            batch,
+            "شروع دریافت خودکار",
+            self._collect_batch,
+            "Batch جدید می‌سازد و CAPTCHAها را با تأخیر تعیین‌شده دریافت می‌کند.",
+            "Primary.TButton",
+        ).grid(row=1, column=2, padx=6, pady=10, sticky="ew")
+        self._button(
+            batch,
+            "توقف عملیات",
+            self.browser.cancel_batch,
+            "دریافت خودکار را حتی در زمان انتظار بین Reloadها متوقف می‌کند.",
+            "Danger.TButton",
+        ).grid(row=1, column=3, padx=6, pady=10, sticky="ew")
+        batch.columnconfigure(2, weight=1)
+        batch.columnconfigure(3, weight=1)
+        ttk.Label(
+            self.browser_tab,
+            text="مرورگر پس از بازشدن بین عملیات فعال می‌ماند و فقط هنگام خروج کامل بسته می‌شود.",
+            style="MutedCard.TLabel",
+        ).pack(anchor="e", pady=(12, 0))
 
-        labeling = ttk.LabelFrame(container, text="۲) پیش‌نمایش و برچسب‌گذاری", padding=10)
-        labeling.pack(fill="x", pady=10)
-        self.preview = ttk.Label(labeling, text="هنوز تصویری دریافت نشده است.", anchor="center")
-        self.preview.grid(row=0, column=0, columnspan=4, sticky="ew", pady=8)
-        ttk.Label(labeling, text="برچسب صحیح:").grid(row=1, column=0, sticky="e")
-        label_entry = ttk.Entry(labeling, textvariable=self.label, width=20, justify="center")
-        label_entry.grid(row=1, column=1, padx=6)
-        label_entry.bind("<Return>", lambda _event: self._save_sample())
-        ttk.Label(labeling, text="تعداد ارقام:").grid(row=1, column=2, sticky="e")
-        ttk.Spinbox(labeling, from_=1, to=10, textvariable=self.sequence_length, width=5).grid(row=1, column=3)
-        ttk.Button(labeling, text="ذخیره نمونه و برچسب", command=self._save_sample).grid(
-            row=2, column=1, pady=8
+    def _build_data_tab(self):
+        labeling = ttk.LabelFrame(
+            self.data_tab,
+            text="پیش‌نمایش و برچسب‌گذاری",
+            style="Card.TLabelframe",
+            padding=18,
         )
-        ttk.Label(labeling, textvariable=self.sample_count).grid(row=2, column=2, columnspan=2)
-        ttk.Button(
-            labeling, text="ورود Batch برچسب‌خورده", command=self._import_batch
-        ).grid(row=3, column=1, columnspan=2, pady=4)
-        labeling.columnconfigure(0, weight=1)
+        labeling.pack(fill="x")
+        self.preview = ttk.Label(
+            labeling,
+            text="هنوز تصویری دریافت نشده است.",
+            anchor="center",
+            style="Card.TLabel",
+        )
+        self.preview.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(8, 18))
+        ttk.Label(labeling, text="برچسب صحیح", style="Card.TLabel").grid(
+            row=1, column=0, sticky="e", padx=8
+        )
+        label_entry = ttk.Entry(labeling, textvariable=self.label, width=20, justify="center")
+        label_entry.grid(row=1, column=1, padx=8, pady=6)
+        label_entry.bind("<Return>", lambda _event: self._save_sample())
+        add_tooltip(label_entry, "عدد نمایش‌داده‌شده در CAPTCHA را با رقم فارسی یا انگلیسی وارد کنید.")
+        ttk.Label(labeling, text="تعداد ارقام", style="Card.TLabel").grid(
+            row=1, column=2, sticky="e", padx=8
+        )
+        length_input = ttk.Spinbox(
+            labeling, from_=1, to=10, textvariable=self.sequence_length, width=8, justify="center"
+        )
+        length_input.grid(row=1, column=3, padx=8)
+        add_tooltip(length_input, "طول دقیق رشته CAPTCHA در Dataset و مدل.")
+        self._button(
+            labeling,
+            "ذخیره نمونه و برچسب",
+            self._save_sample,
+            "تصویر فعلی و برچسب معتبر را به Dataset اضافه می‌کند.",
+            "Primary.TButton",
+        ).grid(row=2, column=1, padx=6, pady=14, sticky="ew")
+        ttk.Label(labeling, textvariable=self.sample_count, style="Card.TLabel").grid(
+            row=2, column=2, columnspan=2, sticky="e", padx=8
+        )
+        self._button(
+            labeling,
+            "ورود Batch برچسب‌خورده",
+            self._import_batch,
+            "پوشه Batch تکمیل‌شده در Excel را اعتبارسنجی و وارد Dataset می‌کند.",
+        ).grid(row=3, column=1, columnspan=2, pady=(4, 8), sticky="ew")
+        labeling.columnconfigure(1, weight=1)
         labeling.columnconfigure(3, weight=1)
 
-        training = ttk.LabelFrame(container, text="۳) آموزش و آزمون مدل", padding=10)
-        training.pack(fill="x")
-        ttk.Label(training, text="Epoch:").grid(row=0, column=0)
-        ttk.Spinbox(training, from_=1, to=500, textvariable=self.epochs, width=7).grid(row=0, column=1, padx=5)
-        ttk.Button(training, text="آموزش مدل", command=self._train).grid(row=0, column=2, padx=10)
-        ttk.Button(training, text="آزمون روی تصویر فعلی", command=self._predict_current).grid(row=0, column=3)
+        training = ttk.LabelFrame(
+            self.data_tab,
+            text="آموزش و ارزیابی مدل",
+            style="Card.TLabelframe",
+            padding=18,
+        )
+        training.pack(fill="x", pady=(14, 0))
+        ttk.Label(training, text="تعداد Epoch", style="Card.TLabel").grid(
+            row=0, column=0, sticky="e", padx=8
+        )
+        epochs_input = ttk.Spinbox(
+            training, from_=1, to=500, textvariable=self.epochs, width=10, justify="center"
+        )
+        epochs_input.grid(row=0, column=1, padx=8, pady=8)
+        add_tooltip(epochs_input, "حداکثر دفعات آموزش؛ Early Stopping ممکن است زودتر آموزش را متوقف کند.")
+        self._button(
+            training,
+            "آموزش مدل",
+            self._train,
+            "مدل را با Dataset فعلی آموزش می‌دهد و دقت اعتبارسنجی را گزارش می‌کند.",
+            "Primary.TButton",
+        ).grid(row=0, column=2, padx=6, sticky="ew")
+        self._button(
+            training,
+            "آزمون تصویر فعلی",
+            self._predict_current,
+            "مدل ذخیره‌شده را روی CAPTCHA فعلی اجرا می‌کند.",
+        ).grid(row=0, column=3, padx=6, sticky="ew")
+        training.columnconfigure(2, weight=1)
+        training.columnconfigure(3, weight=1)
 
-        login = ttk.LabelFrame(container, text="۴) ورود آزمایشی با مدل آموزش‌دیده", padding=10)
-        login.pack(fill="x", pady=10)
-        ttk.Label(login, text="نام کاربری:").grid(row=0, column=0, sticky="e")
-        ttk.Entry(login, textvariable=self.username, width=28).grid(row=0, column=1, padx=6)
-        ttk.Label(login, text="رمز عبور:").grid(row=1, column=0, sticky="e")
-        ttk.Entry(login, textvariable=self.password, show="●", width=28).grid(row=1, column=1, padx=6)
-        ttk.Label(login, text="حداقل اطمینان:").grid(row=0, column=2, sticky="e")
-        ttk.Spinbox(
-            login, from_=0.0, to=1.0, increment=0.05,
-            textvariable=self.minimum_confidence, width=7
-        ).grid(row=0, column=3, padx=6)
-        ttk.Button(login, text="ورود دستی", command=self._manual_login).grid(
-            row=1, column=2, pady=6, padx=4
+    def _build_login_tab(self):
+        login = ttk.LabelFrame(
+            self.login_tab,
+            text="ورود به سامانه FT",
+            style="Card.TLabelframe",
+            padding=22,
         )
-        ttk.Button(login, text="ورود خودکار (حداکثر ۳ تلاش)", command=self._login).grid(
-            row=1, column=3, pady=6, padx=4
+        login.pack(fill="x")
+        ttk.Label(login, text="نام کاربری", style="Card.TLabel").grid(
+            row=0, column=0, sticky="e", padx=8, pady=8
         )
-        ttk.Checkbutton(
+        username_entry = ttk.Entry(login, textvariable=self.username, width=32, justify="left")
+        username_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=8)
+        add_tooltip(username_entry, "نام کاربری سامانه؛ پس از ورود خودکار موفق می‌تواند امن ذخیره شود.")
+        ttk.Label(login, text="حداقل اطمینان مدل", style="Card.TLabel").grid(
+            row=0, column=2, sticky="e", padx=8, pady=8
+        )
+        confidence_input = ttk.Spinbox(
+            login,
+            from_=0.0,
+            to=1.0,
+            increment=0.05,
+            textvariable=self.minimum_confidence,
+            width=10,
+            justify="center",
+        )
+        confidence_input.grid(row=0, column=3, padx=8, pady=8)
+        add_tooltip(confidence_input, "اگر اطمینان مدل کمتر از این مقدار باشد CAPTCHA Reload می‌شود.")
+        ttk.Label(login, text="رمز عبور", style="Card.TLabel").grid(
+            row=1, column=0, sticky="e", padx=8, pady=8
+        )
+        password_entry = ttk.Entry(
+            login, textvariable=self.password, show="●", width=32, justify="left"
+        )
+        password_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=8)
+        add_tooltip(password_entry, "رمز در Log نمایش داده نمی‌شود و با Windows DPAPI محافظت می‌شود.")
+        self._button(
+            login,
+            "ورود دستی",
+            self._manual_login,
+            "صفحه ورود را باز می‌کند تا اطلاعات و CAPTCHA را شخصاً وارد کنید.",
+        ).grid(row=1, column=2, padx=6, pady=8, sticky="ew")
+        self._button(
+            login,
+            "آزمون ورود خودکار",
+            self._login,
+            "مدل CAPTCHA را اجرا می‌کند و حداکثر سه بار برای ورود تلاش می‌کند.",
+            "Primary.TButton",
+        ).grid(row=1, column=3, padx=6, pady=8, sticky="ew")
+        remember = ttk.Checkbutton(
             login,
             text="ذخیره امن پس از ورود موفق",
             variable=self.remember_credentials,
-        ).grid(row=2, column=0, columnspan=2, sticky="e", pady=4)
-        ttk.Button(login, text="ذخیره تنظیمات", command=self._save_preferences).grid(
-            row=2, column=2, pady=4, padx=4
         )
-        ttk.Button(login, text="پاک کردن اطلاعات ورود", command=self._forget_credentials).grid(
-            row=2, column=3, pady=4, padx=4
-        )
+        remember.grid(row=2, column=0, columnspan=2, sticky="e", padx=8, pady=12)
+        add_tooltip(remember, "Credential فقط پس از تأیید ورود خودکار و برای همین حساب Windows ذخیره می‌شود.")
+        self._button(
+            login,
+            "ذخیره تنظیمات",
+            self._save_preferences,
+            "تنظیمات غیرحساس رابط را در پروفایل کاربر ذخیره می‌کند.",
+        ).grid(row=2, column=2, padx=6, pady=8, sticky="ew")
+        self._button(
+            login,
+            "پاک کردن اطلاعات ورود",
+            self._forget_credentials,
+            "Credential رمزگذاری‌شده را حذف و فیلدهای ورود را خالی می‌کند.",
+            "Danger.TButton",
+        ).grid(row=2, column=3, padx=6, pady=8, sticky="ew")
         ttk.Label(
             login,
-            text="رمز با Windows DPAPI محافظت می‌شود و در خروجی نمایش داده نمی‌شود.",
-        ).grid(row=3, column=0, columnspan=4, pady=(2, 0))
+            text="اطلاعات ورود با Windows DPAPI محافظت می‌شوند و در خروجی برنامه نوشته نمی‌شوند.",
+            style="MutedCard.TLabel",
+            anchor="e",
+        ).grid(row=3, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 2))
+        login.columnconfigure(1, weight=1)
+        login.columnconfigure(2, weight=1)
+        login.columnconfigure(3, weight=1)
 
-        ttk.Separator(container).pack(fill="x", pady=6)
-        ttk.Label(container, textvariable=self.status, anchor="center").pack(fill="x")
-
-        output_header = ttk.Frame(container)
-        output_header.pack(fill="x", pady=(8, 4))
-        ttk.Label(output_header, text="خروجی عملیات").pack(side="right")
-        ttk.Button(output_header, text="کپی کل", command=self._copy_log).pack(side="left")
-        ttk.Button(output_header, text="پاک کردن", command=self._clear_log).pack(
-            side="left", padx=6
-        )
+    def _build_output_tab(self):
+        toolbar = ttk.Frame(self.output_tab)
+        toolbar.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            toolbar,
+            text="گزارش زمان‌دار عملیات",
+            font=("Tahoma", 10, "bold"),
+        ).pack(side="right")
+        self._button(
+            toolbar,
+            "کپی کل خروجی",
+            self._copy_log,
+            "همه پیام‌ها را برای ارسال به پشتیبانی یا ایجنت در Clipboard کپی می‌کند.",
+        ).pack(side="left")
+        self._button(
+            toolbar,
+            "پاک کردن نمایش",
+            self._clear_log,
+            "فقط متن قابل‌مشاهده را پاک می‌کند و اثری بر فایل‌ها یا تنظیمات ندارد.",
+            "Danger.TButton",
+        ).pack(side="left", padx=8)
         self.output = scrolledtext.ScrolledText(
-            container,
-            height=10,
+            self.output_tab,
             wrap="word",
             state="disabled",
-            font=("Cascadia Mono", 9),
+            font=("Tahoma", 10),
+            background=COLORS["log_background"],
+            foreground=COLORS["log_text"],
+            insertbackground="#FFFFFF",
+            selectbackground="#365C8D",
+            selectforeground="#FFFFFF",
+            relief="flat",
+            borderwidth=0,
+            padx=14,
+            pady=12,
         )
         self.output.pack(fill="both", expand=True)
-        self.output.tag_configure("info", foreground="#1565C0")
-        self.output.tag_configure("success", foreground="#2E7D32")
-        self.output.tag_configure("warning", foreground="#9A6700")
-        self.output.tag_configure("error", foreground="#C62828")
+        self.output.tag_configure("info", foreground="#7CC4FF")
+        self.output.tag_configure("success", foreground="#6CE9A6")
+        self.output.tag_configure("warning", foreground="#FEC84B")
+        self.output.tag_configure("error", foreground="#FDA29B")
+        add_tooltip(self.output, "متن خروجی قابل انتخاب و کپی است؛ رمز عبور هرگز در این بخش ثبت نمی‌شود.")
         self._log("info", "برنامه آماده است؛ مرورگر در تمام عملیات باز می‌ماند.")
-        ttk.Label(container, text=f"نسخه {APP_VERSION}", anchor="w").pack(fill="x", pady=(4, 0))
 
     def _log(self, level, message):
         timestamp = time.strftime("%H:%M:%S")
@@ -331,6 +731,7 @@ class CaptchaLabApp:
             self.preview_reference = ImageTk.PhotoImage(preview)
         self.preview.configure(image=self.preview_reference, text="")
         self.label.set("")
+        self.notebook.select(self.data_tab)
 
     def _save_sample(self):
         try:
