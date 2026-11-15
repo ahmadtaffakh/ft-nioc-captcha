@@ -266,8 +266,12 @@ class BrowserSession:
 
         connection = open_state(self.profile_dir.parent / "state.db")
         failed = 0
+        processed = 0
+        consecutive_failures = 0
+        stopped = False
         try:
             for path in selected:
+                processed += 1
                 try:
                     process_file(
                         connection,
@@ -278,16 +282,28 @@ class BrowserSession:
                         scan_timeout_minutes * 60,
                         self._emit,
                     )
+                    consecutive_failures = 0
                 except Exception as error:
                     failed += 1
+                    consecutive_failures += 1
                     self._emit("error", f"خطا برای {path.name}: {error}")
+                    if consecutive_failures == 2:
+                        stopped = True
+                        self._emit(
+                            "error",
+                            "دو ردیف پیاپی خطا دادند؛ ادامه ثبت متوقف شد.",
+                        )
+                        break
         finally:
             connection.close()
-        return {
-            "processed": len(selected),
+        result = {
+            "processed": processed,
             "failed": failed,
             "oversized": len(oversized),
         }
+        if stopped:
+            result["stopped"] = True
+        return result
 
     def close(self):
         if self.context is not None:

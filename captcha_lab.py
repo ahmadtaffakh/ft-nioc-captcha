@@ -1022,6 +1022,8 @@ class CaptchaLabApp:
                     f"اجرای آپلود تمام شد؛ پردازش: {payload['processed']}، "
                     f"خطا: {payload['failed']}، عبور از سقف حجم: {payload['oversized']}"
                 )
+                if payload.get("stopped"):
+                    message += " — توقف پس از دو خطای پیاپی"
                 self.status.set(message)
                 self._log("success" if payload["failed"] == 0 else "warning", message)
             elif isinstance(payload, str):

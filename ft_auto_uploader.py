@@ -451,6 +451,8 @@ def main() -> int:
 
         try:
             cycle_started = time.monotonic()
+            consecutive_failures = 0
+            stop_after_errors = False
             while True:
                 ready = find_ready_files(watch_dir, observations, args.stable_seconds)
                 selected, oversized = select_files_for_run(
@@ -477,8 +479,16 @@ def main() -> int:
                             args.scan_timeout_minutes * 60,
                         )
                         observations.pop(path, None)
+                        consecutive_failures = 0
                     except Exception as error:
+                        consecutive_failures += 1
                         print(f"خطا برای {path.name}: {error}")
+                        if consecutive_failures == 2:
+                            print("دو ردیف پیاپی خطا دادند؛ برنامه خارج می‌شود.")
+                            stop_after_errors = True
+                            break
+                if stop_after_errors:
+                    break
                 if args.run_once and time.monotonic() - cycle_started >= args.stable_seconds:
                     break
                 time.sleep(args.poll_seconds)

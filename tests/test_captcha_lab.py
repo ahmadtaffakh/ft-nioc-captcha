@@ -155,6 +155,37 @@ class BatchCaptureTest(unittest.TestCase):
             wait.assert_called_once()
             self.assertEqual(result, {"processed": 0, "failed": 0, "oversized": 0})
 
+    def test_upload_stops_only_after_two_consecutive_errors(self):
+        scenarios = (
+            ([Exception("first"), None, Exception("third"), None], 4, False),
+            ([Exception("first"), Exception("second"), None], 2, True),
+        )
+        for side_effects, expected_calls, should_stop in scenarios:
+            with self.subTest(should_stop=should_stop), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary) / "inbox"
+                folder.mkdir()
+                for index in range(len(side_effects)):
+                    (folder / f"{index}.pdf").write_bytes(b"data")
+                results = queue.Queue()
+                session = BrowserSession(Path(temporary) / "profile", results)
+                session.page = Mock()
+                session.context = Mock()
+                try:
+                    with (
+                        patch("ft_runtime.wait_for_file_manager"),
+                        patch("ft_runtime.process_file", side_effect=side_effects) as process,
+                    ):
+                        result = session.upload_folder(folder, 0, 0)
+                finally:
+                    session.executor.shutdown(wait=False, cancel_futures=True)
+
+                self.assertEqual(process.call_count, expected_calls)
+                self.assertEqual(result.get("stopped", False), should_stop)
+                messages = [item.message for item in list(results.queue)]
+                self.assertEqual(
+                    any("دو ردیف پیاپی" in message for message in messages), should_stop
+                )
+
 
 class CredentialPersistenceTest(unittest.TestCase):
     def test_successful_automatic_login_saves_credentials(self):
