@@ -7,199 +7,34 @@ import queue
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from captcha_training import (
-    decode_image_data_url,
     import_labeled_batch,
     load_model,
     predict_image,
     read_labels,
     save_labeled_sample,
-    save_unlabeled_batch_sample,
     train_model,
 )
-from ft_browser import app_data_dir, launch_persistent_session
-
-
-LOGIN_URL = "https://ft.nioc.ir/dargah/user/sign-in"
-DEFAULT_CAPTCHA_SELECTOR = "img[src^='data:image/']"
-USERNAME_SELECTOR = "div.itc-card__content > div > div:nth-of-type(1) input"
-PASSWORD_SELECTOR = "div.itc-card__content > div > div:nth-of-type(2) input"
-CAPTCHA_INPUT_SELECTOR = "div:nth-of-type(3) input"
-
-
-def _captcha_locator(page, preferred_selector: str):
-    """Find a visible CAPTCHA image, preferring the configured selector."""
-    if preferred_selector:
-        preferred = page.locator(preferred_selector)
-        for index in range(preferred.count()):
-            candidate = preferred.nth(index)
-            if candidate.is_visible():
-                box = candidate.bounding_box()
-                if box and box["width"] >= 60 and box["height"] >= 20:
-                    return candidate
-
-    candidates = page.locator("img")
-    best = None
-    best_score = -1
-    for index in range(candidates.count()):
-        candidate = candidates.nth(index)
-        if not candidate.is_visible():
-            continue
-        box = candidate.bounding_box()
-        if not box:
-            continue
-        width, height = box["width"], box["height"]
-        if not (60 <= width <= 400 and 20 <= height <= 140):
-            continue
-        aspect = width / max(height, 1)
-        if not 1.4 <= aspect <= 8:
-            continue
-        src = candidate.get_attribute("src") or ""
-        score = 10 if src.startswith("data:image/") else 0
-        score += 5 if "captcha" in src.lower() else 0
-        score += aspect
-        if score > best_score:
-            best, best_score = candidate, score
-    if best is None:
-        raise RuntimeError("تصویر CAPTCHA پیدا نشد؛ selector را اصلاح کنید.")
-    return best
-
-
-def capture_captcha_bytes(page, selector: str) -> bytes:
-    """Read original data-URL bytes, falling back to an element screenshot."""
-    image = _captcha_locator(page, selector)
-    image.wait_for(state="visible", timeout=15_000)
-    src = image.get_attribute("src") or ""
-    if src.startswith("data:image/"):
-        try:
-            return decode_image_data_url(src)
-        except ValueError:
-            pass
-    return image.screenshot(type="png")
-
-
-class BrowserSession:
-    """Keep all synchronous Playwright access on one dedicated thread."""
-
-    def __init__(self, profile_dir: Path, results: queue.Queue):
-        self.profile_dir = Path(profile_dir)
-        self.results = results
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ft-browser")
-        self.playwright = None
-        self.context = None
-        self.page = None
-        self.batch_cancelled = threading.Event()
-
-    def submit(self, token: str, operation, *args) -> None:
-        future = self.executor.submit(operation, *args)
-
-        def completed(done):
-            try:
-                self.results.put((token, True, done.result()))
-            except Exception as error:
-                self.results.put((token, False, str(error)))
-
-        future.add_done_callback(completed)
-
-    def open(self):
-        if self.context is None:
-            from playwright.sync_api import sync_playwright
-
-            self.playwright = sync_playwright().start()
-            self.context, self.page = launch_persistent_session(
-                self.playwright, self.profile_dir
-            )
-        self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        return "مرورگر باز شد."
-
-    def capture(self, selector: str):
-        if self.page is None:
-            raise RuntimeError("ابتدا مرورگر را باز کنید.")
-        return capture_captcha_bytes(self.page, selector)
-
-    def refresh(self):
-        if self.page is None:
-            raise RuntimeError("ابتدا مرورگر را باز کنید.")
-        self.page.reload(wait_until="domcontentloaded")
-        return "CAPTCHA تازه دریافت شد."
-
-    def collect_batch(self, selector: str, batch_dir: Path, count: int):
-        if self.page is None:
-            raise RuntimeError("ابتدا مرورگر را باز کنید.")
-        if count < 1:
-            raise ValueError("تعداد نمونه باید حداقل یک باشد.")
-        self.batch_cancelled.clear()
-        collected = 0
-        for index in range(1, count + 1):
-            if self.batch_cancelled.is_set():
-                break
-            image_bytes = capture_captcha_bytes(self.page, selector)
-            save_unlabeled_batch_sample(batch_dir, image_bytes, index)
-            collected += 1
-            if index < count and not self.batch_cancelled.is_set():
-                self.page.reload(wait_until="domcontentloaded")
-        return {"count": collected, "requested": count, "batch_dir": str(batch_dir)}
-
-    def cancel_batch(self):
-        self.batch_cancelled.set()
-
-    def login(
-        self,
-        username: str,
-        password: str,
-        selector: str,
-        model_dir: Path,
-        minimum_confidence: float,
-    ):
-        if not username or not password:
-            raise ValueError("نام کاربری و رمز عبور را وارد کنید.")
-        if self.page is None:
-            self.open()
-        model_bundle = load_model(model_dir)
-        last_prediction = None
-        for attempt in range(1, 4):
-            if "/filemanager/" in self.page.url:
-                return "ورود قبلاً انجام شده است."
-            self.page.locator(USERNAME_SELECTOR).fill(username)
-            self.page.locator(PASSWORD_SELECTOR).fill(password)
-            image_bytes = capture_captcha_bytes(self.page, selector)
-            prediction, confidence = predict_image(image_bytes, model_bundle)
-            last_prediction = f"{prediction} ({confidence:.1%})"
-            if confidence < minimum_confidence:
-                self.page.reload(wait_until="domcontentloaded")
-                continue
-            captcha_input = self.page.locator(CAPTCHA_INPUT_SELECTOR)
-            captcha_input.fill(prediction)
-            captcha_input.press("Enter")
-            try:
-                self.page.wait_for_url("**/filemanager/**", timeout=10_000)
-                return f"ورود موفق؛ CAPTCHA: {last_prediction}"
-            except Exception:
-                if attempt < 3:
-                    self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        raise RuntimeError(f"ورود پس از ۳ تلاش موفق نشد؛ آخرین تشخیص: {last_prediction}")
-
-    def close(self):
-        if self.context is not None:
-            self.context.close()
-            self.context = None
-            self.page = None
-        if self.playwright is not None:
-            self.playwright.stop()
-            self.playwright = None
+from ft_browser import app_data_dir
+from ft_runtime import (
+    BrowserSession,
+    DEFAULT_CAPTCHA_SELECTOR,
+    RuntimeResult,
+    capture_captcha_bytes,
+)
 
 
 class CaptchaLabApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("آزمایشگاه CAPTCHA سامانه FT")
-        self.root.geometry("820x680")
+        self.root.geometry("920x860")
+        self.root.minsize(820, 720)
         self.base_dir = app_data_dir()
         self.dataset_dir = self.base_dir / "captcha-data"
         self.batch_root = self.base_dir / "captcha-batches"
@@ -215,6 +50,7 @@ class CaptchaLabApp:
         self.label = tk.StringVar()
         self.sequence_length = tk.IntVar(value=5)
         self.batch_count = tk.IntVar(value=1000)
+        self.reload_delay_seconds = tk.DoubleVar(value=1.0)
         self.epochs = tk.IntVar(value=40)
         self.minimum_confidence = tk.DoubleVar(value=0.75)
         self.username = tk.StringVar()
@@ -244,11 +80,22 @@ class CaptchaLabApp:
         ttk.Spinbox(browser, from_=1, to=10000, textvariable=self.batch_count, width=8).grid(
             row=2, column=1, sticky="w", padx=6
         )
+        ttk.Label(browser, text="تأخیر بعد از Reload (ثانیه):").grid(
+            row=2, column=2, sticky="e"
+        )
+        ttk.Spinbox(
+            browser,
+            from_=0,
+            to=60,
+            increment=0.5,
+            textvariable=self.reload_delay_seconds,
+            width=8,
+        ).grid(row=2, column=3, sticky="w", padx=6)
         ttk.Button(browser, text="دریافت خودکار", command=self._collect_batch).grid(
-            row=2, column=2, pady=4
+            row=3, column=1, pady=4
         )
         ttk.Button(browser, text="توقف", command=self.browser.cancel_batch).grid(
-            row=2, column=3, pady=4
+            row=3, column=2, pady=4
         )
         browser.columnconfigure(1, weight=1)
 
@@ -290,17 +137,60 @@ class CaptchaLabApp:
             login, from_=0.0, to=1.0, increment=0.05,
             textvariable=self.minimum_confidence, width=7
         ).grid(row=0, column=3, padx=6)
+        ttk.Button(login, text="ورود دستی", command=self._manual_login).grid(
+            row=1, column=2, pady=6, padx=4
+        )
         ttk.Button(login, text="ورود خودکار (حداکثر ۳ تلاش)", command=self._login).grid(
-            row=1, column=2, columnspan=2, pady=6
+            row=1, column=3, pady=6, padx=4
         )
 
         ttk.Separator(container).pack(fill="x", pady=6)
         ttk.Label(container, textvariable=self.status, anchor="center").pack(fill="x")
 
-    def _submit(self, token, operation, *args, success=None):
+        output_header = ttk.Frame(container)
+        output_header.pack(fill="x", pady=(8, 4))
+        ttk.Label(output_header, text="خروجی عملیات").pack(side="right")
+        ttk.Button(output_header, text="کپی کل", command=self._copy_log).pack(side="left")
+        ttk.Button(output_header, text="پاک کردن", command=self._clear_log).pack(
+            side="left", padx=6
+        )
+        self.output = scrolledtext.ScrolledText(
+            container,
+            height=10,
+            wrap="word",
+            state="disabled",
+            font=("Cascadia Mono", 9),
+        )
+        self.output.pack(fill="both", expand=True)
+        self.output.tag_configure("info", foreground="#1565C0")
+        self.output.tag_configure("success", foreground="#2E7D32")
+        self.output.tag_configure("warning", foreground="#9A6700")
+        self.output.tag_configure("error", foreground="#C62828")
+        self._log("info", "برنامه آماده است؛ مرورگر در تمام عملیات باز می‌ماند.")
+
+    def _log(self, level, message):
+        timestamp = time.strftime("%H:%M:%S")
+        self.output.configure(state="normal")
+        self.output.insert("end", f"[{timestamp}] {message}\n", level)
+        self.output.configure(state="disabled")
+        self.output.see("end")
+
+    def _copy_log(self):
+        text = self.output.get("1.0", "end-1c")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status.set("کل خروجی کپی شد.")
+
+    def _clear_log(self):
+        self.output.configure(state="normal")
+        self.output.delete("1.0", "end")
+        self.output.configure(state="disabled")
+
+    def _submit(self, operation_name, operation, *args, success=None):
         self.status.set("در حال انجام...")
-        self.callbacks[token] = success
-        self.browser.submit(token, operation, *args)
+        self._log("info", f"شروع عملیات: {operation_name}")
+        task_id = self.browser.submit(operation_name, operation, *args)
+        self.callbacks[task_id] = success
 
     def _open_browser(self):
         self._submit("open", self.browser.open)
@@ -311,14 +201,21 @@ class CaptchaLabApp:
     def _refresh(self):
         self._submit("refresh", self.browser.refresh)
 
+    def _manual_login(self):
+        self._submit("manual_login", self.browser.manual_login)
+
     def _collect_batch(self):
         try:
             count = self.batch_count.get()
+            reload_delay = self.reload_delay_seconds.get()
         except tk.TclError:
-            messagebox.showerror("خطا", "تعداد Batch باید عدد صحیح باشد.")
+            messagebox.showerror("خطا", "تعداد Batch و تأخیر Reload باید عددی باشند.")
             return
         if not 1 <= count <= 10000:
             messagebox.showerror("خطا", "تعداد Batch باید بین ۱ و ۱۰۰۰۰ باشد.")
+            return
+        if not 0 <= reload_delay <= 60:
+            messagebox.showerror("خطا", "تأخیر Reload باید بین صفر و ۶۰ ثانیه باشد.")
             return
         batch_dir = self.batch_root / f"batch-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1000:03d}"
         self._submit(
@@ -327,6 +224,7 @@ class CaptchaLabApp:
             self.selector.get(),
             batch_dir,
             count,
+            reload_delay,
         )
 
     def _show_image(self, image_bytes):
@@ -352,6 +250,7 @@ class CaptchaLabApp:
             messagebox.showerror("خطا", str(error))
             return
         self.status.set(f"نمونه ذخیره شد: {path.name}")
+        self._log("success", f"نمونه ذخیره شد: {path.name}")
         self.current_image = None
         self.preview.configure(image="", text="نمونه ذخیره شد؛ CAPTCHA بعدی را دریافت کنید.")
         self.preview_reference = None
@@ -384,9 +283,11 @@ class CaptchaLabApp:
                 count = import_labeled_batch(
                     Path(selected), self.dataset_dir, sequence_length
                 )
-                self.results.put(("import_batch", True, count))
+                self.results.put(RuntimeResult("import_batch", "import_batch", True, count))
             except Exception as error:
-                self.results.put(("import_batch", False, str(error)))
+                self.results.put(
+                    RuntimeResult("import_batch", "import_batch", False, str(error))
+                )
 
         self.status.set("در حال ورود Batch...")
         threading.Thread(target=work, daemon=True).start()
@@ -413,9 +314,9 @@ class CaptchaLabApp:
                     sequence_length,
                     epochs,
                 )
-                self.results.put(("train", True, result))
+                self.results.put(RuntimeResult("train", "train", True, result))
             except Exception as error:
-                self.results.put(("train", False, str(error)))
+                self.results.put(RuntimeResult("train", "train", False, str(error)))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -428,9 +329,9 @@ class CaptchaLabApp:
         def work():
             try:
                 prediction = predict_image(image_bytes, load_model(self.model_dir))
-                self.results.put(("predict", True, prediction))
+                self.results.put(RuntimeResult("predict", "predict", True, prediction))
             except Exception as error:
-                self.results.put(("predict", False, str(error)))
+                self.results.put(RuntimeResult("predict", "predict", False, str(error)))
 
         self.status.set("در حال پیش‌بینی...")
         threading.Thread(target=work, daemon=True).start()
@@ -457,48 +358,67 @@ class CaptchaLabApp:
     def _poll_results(self):
         while True:
             try:
-                token, succeeded, payload = self.results.get_nowait()
+                result = self.results.get_nowait()
             except queue.Empty:
                 break
-            callback = self.callbacks.pop(token, None)
-            if token == "close":
+            task_id = result.task_id
+            operation = result.operation
+            succeeded = result.succeeded
+            payload = result.payload
+            callback = self.callbacks.pop(task_id, None)
+            if operation == "close":
                 self.browser.executor.shutdown(wait=False, cancel_futures=True)
                 self.root.destroy()
                 return
             if not succeeded:
                 self.status.set("عملیات ناموفق بود.")
+                self._log("error", f"{operation}: {payload}")
                 messagebox.showerror("خطا", payload)
                 continue
             if callback:
                 callback(payload)
-            if token == "collect_batch":
+            if operation == "collect_batch":
                 state = "کامل شد" if payload["count"] == payload["requested"] else "متوقف شد"
-                self.status.set(
-                    f"Batch {state}؛ {payload['count']} تصویر: {payload['batch_dir']}"
-                )
-            elif token == "import_batch":
+                message = f"Batch {state}؛ {payload['count']} تصویر: {payload['batch_dir']}"
+                self.status.set(message)
+                self._log("success" if state == "کامل شد" else "warning", message)
+            elif operation == "import_batch":
                 self._update_sample_count()
-                self.status.set(f"{payload} نمونه از Batch وارد Dataset شد.")
-            elif token == "train":
-                self.status.set(
+                message = f"{payload} نمونه از Batch وارد Dataset شد."
+                self.status.set(message)
+                self._log("success", message)
+            elif operation == "train":
+                message = (
                     f"آموزش تمام شد؛ {payload['samples']} نمونه، "
                     f"دقت کامل اعتبارسنجی: {payload['exact_match']:.1%}"
                 )
-            elif token == "predict":
+                self.status.set(message)
+                self._log("success", message)
+            elif operation == "predict":
                 text, confidence = payload
-                self.status.set(f"تشخیص: {text} — حداقل اطمینان: {confidence:.1%}")
+                message = f"تشخیص: {text} — حداقل اطمینان: {confidence:.1%}"
+                self.status.set(message)
+                self._log("success", message)
             elif isinstance(payload, str):
                 self.status.set(payload)
+                self._log("success", payload)
             else:
                 self.status.set("عملیات با موفقیت انجام شد.")
+                self._log("success", f"عملیات {operation} با موفقیت انجام شد.")
         self.root.after(100, self._poll_results)
 
     def _on_close(self):
         if self.closing:
             return
+        if not messagebox.askyesno(
+            "خروج از برنامه",
+            "مرورگر بین عملیات باز می‌ماند. با خروج کامل از برنامه، مرورگر هم بسته می‌شود. ادامه می‌دهید؟",
+        ):
+            return
         self.closing = True
         self.browser.cancel_batch()
         self.status.set("در حال بستن مرورگر...")
+        self._log("warning", "در حال بستن برنامه و مرورگر...")
         self.browser.submit("close", self.browser.close)
 
 

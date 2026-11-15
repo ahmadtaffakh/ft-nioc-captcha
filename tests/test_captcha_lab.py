@@ -1,12 +1,13 @@
 import base64
 import queue
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-from unittest.mock import Mock
+from unittest.mock import Mock, call, patch
 
-from captcha_lab import BrowserSession, capture_captcha_bytes
+from ft_runtime import BrowserSession, capture_captcha_bytes
 
 
 class CaptchaCaptureTest(unittest.TestCase):
@@ -43,8 +44,8 @@ class BatchCaptureTest(unittest.TestCase):
             session.page = Mock()
             batch_dir = Path(temporary) / "batch"
             try:
-                with patch("captcha_lab.capture_captcha_bytes", return_value=b"png") as capture:
-                    result = session.collect_batch("img.captcha", batch_dir, 3)
+                with patch("ft_runtime.capture_captcha_bytes", return_value=b"png") as capture:
+                    result = session.collect_batch("img.captcha", batch_dir, 3, 0)
             finally:
                 session.executor.shutdown(wait=False, cancel_futures=True)
 
@@ -52,6 +53,89 @@ class BatchCaptureTest(unittest.TestCase):
             self.assertEqual(capture.call_count, 3)
             self.assertEqual(session.page.reload.call_count, 2)
             self.assertEqual(len(list((batch_dir / "images").glob("*.png"))), 3)
+
+    def test_waits_configured_delay_after_each_reload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = BrowserSession(Path(temporary) / "profile", queue.Queue())
+            session.page = Mock()
+            batch_dir = Path(temporary) / "batch"
+            try:
+                with (
+                    patch("ft_runtime.capture_captcha_bytes", return_value=b"png"),
+                    patch.object(session.batch_cancelled, "wait", return_value=False) as wait,
+                ):
+                    session.collect_batch("img.captcha", batch_dir, 3, 2.5)
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
+            self.assertEqual(wait.call_args_list, [call(2.5)] * 2)
+
+    def test_stop_during_reload_delay_prevents_next_captcha_read(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = BrowserSession(Path(temporary) / "profile", queue.Queue())
+            session.page = Mock()
+            batch_dir = Path(temporary) / "batch"
+            try:
+                with (
+                    patch("ft_runtime.capture_captcha_bytes", return_value=b"png") as capture,
+                    patch.object(session.batch_cancelled, "wait", return_value=True),
+                ):
+                    result = session.collect_batch("img.captcha", batch_dir, 3, 5)
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(capture.call_count, 1)
+            session.page.reload.assert_called_once_with(wait_until="domcontentloaded")
+
+    def test_repeated_open_reuses_one_browser_session(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        context = Mock()
+        page = Mock()
+        playwright = Mock()
+        starter = Mock()
+        starter.start.return_value = playwright
+        playwright_module = types.ModuleType("playwright")
+        sync_api_module = types.ModuleType("playwright.sync_api")
+        sync_api_module.sync_playwright = Mock(return_value=starter)
+        playwright_module.sync_api = sync_api_module
+        try:
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "playwright": playwright_module,
+                        "playwright.sync_api": sync_api_module,
+                    },
+                ),
+                patch(
+                    "ft_runtime.launch_persistent_session",
+                    return_value=(context, page),
+                ) as launch,
+            ):
+                session.open()
+                session.open()
+        finally:
+            session.close()
+            session.executor.shutdown(wait=False, cancel_futures=True)
+
+        sync_api_module.sync_playwright.assert_called_once_with()
+        launch.assert_called_once_with(playwright, Path("profile"))
+        self.assertEqual(page.goto.call_count, 2)
+
+    def test_manual_login_reuses_open_browser_page(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        session.page = Mock()
+        try:
+            message = session.manual_login()
+        finally:
+            session.executor.shutdown(wait=False, cancel_futures=True)
+
+        session.page.goto.assert_called_once_with(
+            "https://ft.nioc.ir/dargah/user/sign-in",
+            wait_until="domcontentloaded",
+        )
+        self.assertIn("ورود دستی", message)
 
 
 if __name__ == "__main__":

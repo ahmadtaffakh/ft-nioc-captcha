@@ -28,14 +28,21 @@ python captcha_lab.py
 ## جریان کار
 
 1. در شبکه شرکت روی «بازکردن مرورگر» کلیک کنید.
-2. «دریافت CAPTCHA» تصویر اصلی `data:image/...;base64` را می‌خواند؛ اگر
+2. مرورگر در تمام عملیات همان اجرای برنامه باز می‌ماند. برای ورود توسط کاربر
+   می‌توانید دکمه «ورود دستی» را بزنید.
+3. «دریافت CAPTCHA» تصویر اصلی `data:image/...;base64` را می‌خواند؛ اگر
    در دسترس نباشد از screenshot همان عنصر استفاده می‌شود.
-3. مقدار درست را با رقم فارسی یا انگلیسی وارد و نمونه را ذخیره کنید.
-4. برای ارزیابی اولیه حداقل ۲۰ نمونه لازم است؛ برای استفاده واقعی حداقل
+4. در دریافت خودکار، «تأخیر بعد از Reload» فاصله زمانی بین بارگذاری صفحه و
+   خواندن CAPTCHA بعدی را تعیین می‌کند. مقدار مجاز صفر تا ۶۰ ثانیه است.
+5. مقدار درست را با رقم فارسی یا انگلیسی وارد و نمونه را ذخیره کنید.
+6. برای ارزیابی اولیه حداقل ۲۰ نمونه لازم است؛ برای استفاده واقعی حداقل
    ۵۰۰ نمونه متنوع توصیه می‌شود.
-5. مدل را آموزش دهید و دقت کامل رشته را بررسی کنید.
-6. پس از رسیدن به دقت قابل قبول، ورود آزمایشی را با حداقل confidence مناسب
+7. مدل را آموزش دهید و دقت کامل رشته را بررسی کنید.
+8. پس از رسیدن به دقت قابل قبول، ورود آزمایشی را با حداقل confidence مناسب
    اجرا کنید. برنامه حداکثر سه بار تلاش می‌کند.
+
+پیام عملیات در کادر خروجی رنگی نمایش داده می‌شود. متن قابل انتخاب است و دکمه
+«کپی کل» همه خروجی را برای ارسال گزارش خطا در Clipboard قرار می‌دهد.
 
 ## جمع‌آوری و برچسب‌گذاری گروهی
 
@@ -49,6 +56,154 @@ python captcha_lab.py
 
 داده‌ها و مدل در `%LOCALAPPDATA%\ft-nioc-uploader` نگهداری می‌شوند و نباید
 به Git اضافه شوند.
+
+## تست مو‌به‌موی آپلود فایل در اداره
+
+> **مهم:** بسته `FT-Captcha-Portable.zip` فقط آزمایشگاه CAPTCHA را اجرا
+> می‌کند و شامل آپلودر پوشه‌ای نیست. برای تست آپلود، فعلاً باید سورس پروژه و
+> Python روی سیستم اداره در دسترس باشند.
+
+### ۱. آماده‌سازی اولیه (فقط بار اول)
+
+کل پوشه پروژه را روی سیستم اداره کپی کنید. در مثال زیر فرض شده پروژه در
+`C:\FT-Tools\ft.nioc.ir` قرار دارد. اگر آن را جای دیگری کپی کرده‌اید، فقط مقدار
+خط اول را عوض کنید.
+
+PowerShell را باز کنید و دستورات زیر را به ترتیب اجرا کنید:
+
+```powershell
+$ProjectDir = "C:\FT-Tools\ft.nioc.ir"
+Set-Location -LiteralPath $ProjectDir
+
+py -0p
+py -3.12 --version
+```
+
+اگر دستور دوم نسخه Python 3.12 را نمایش نداد، ابتدا Python 3.12 نسخه 64 بیتی
+را نصب کنید و هنگام نصب گزینه `Add python.exe to PATH` را فعال کنید. سپس یک
+PowerShell تازه باز کنید و ادامه دهید:
+
+```powershell
+$ProjectDir = "C:\FT-Tools\ft.nioc.ir"
+Set-Location -LiteralPath $ProjectDir
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+py -3.12 -m venv C:\venvs\ft-uploader
+& C:\venvs\ft-uploader\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+نصب packageها و Chromium به دسترسی اینترنت یا مخزن داخلی مورد تأیید اداره
+نیاز دارد. برای اطمینان از نصب صحیح، این کنترل‌ها را اجرا کنید:
+
+```powershell
+python --version
+python -c "from playwright.sync_api import sync_playwright; print('Playwright OK')"
+python -m unittest tests.test_ft_auto_uploader tests.test_ft_browser -v
+Test-NetConnection ft.nioc.ir -Port 443
+```
+
+نتیجه مورد انتظار:
+
+- عبارت `Playwright OK` چاپ شود.
+- هر ۸ تست با وضعیت `OK` تمام شوند.
+- در خروجی دستور آخر، مقدار `TcpTestSucceeded` برابر `True` باشد.
+
+این تست‌های محلی فایل واقعی به سامانه FT ارسال نمی‌کنند.
+
+### ۲. آماده‌کردن یک فایل آزمایشی
+
+پوشه تست را ایجاد و خالی کنید:
+
+```powershell
+New-Item -ItemType Directory -Path C:\FT-Test -Force
+Get-ChildItem -LiteralPath C:\FT-Test -Force
+```
+
+اگر پوشه خالی نیست، فایل‌های قبلی را با File Explorer به محل دیگری منتقل
+کنید. آپلودر همه فایل‌های موجود در ریشه این پوشه را بررسی می‌کند؛ بنابراین
+برای تست اول فقط یک فایل کم‌حجم، غیرمحرمانه و با پسوند مجاز سامانه FT در آن
+قرار دهید. نمونه زیر را پس از جایگزین‌کردن مسیر فایل واقعی اجرا کنید:
+
+```powershell
+Copy-Item -LiteralPath "C:\Path\To\Allowed-Test-File.pdf" -Destination "C:\FT-Test\Allowed-Test-File.pdf"
+Get-ChildItem -LiteralPath C:\FT-Test -File | Select-Object Name, Length, LastWriteTime
+```
+
+قبل از ادامه مطمئن شوید فقط همان یک فایل نمایش داده می‌شود.
+
+### ۳. اجرای تست واقعی آپلود
+
+در همان PowerShell این دستورات را اجرا کنید:
+
+```powershell
+$ProjectDir = "C:\FT-Tools\ft.nioc.ir"
+Set-Location -LiteralPath $ProjectDir
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+& C:\venvs\ft-uploader\Scripts\Activate.ps1
+
+python ft_auto_uploader.py --watch-dir "C:\FT-Test"
+```
+
+مرورگر Chromium باز می‌شود. در صفحه FT نام کاربری، رمز عبور و CAPTCHA را
+دستی وارد کنید. اطلاعات ورود توسط برنامه در فایل یا دیتابیس ذخیره نمی‌شود.
+بعد از ورود، پنجره PowerShell باید پیام زیر را نشان دهد:
+
+```text
+پایش پوشه آغاز شد: C:\FT-Test
+```
+
+فایل پس از ثابت‌ماندن اندازه آن، آپلود می‌شود و برنامه منتظر نتیجه اسکن سامانه
+می‌ماند. پنجره مرورگر و PowerShell را تا مشخص‌شدن نتیجه نبندید.
+
+### ۴. تشخیص نتیجه
+
+- `ارسال و بایگانی شد`: تست موفق بوده و فایل به
+  `C:\FT-Test\_uploaded` منتقل شده است.
+- `ارسال قبلی تأیید و بایگانی شد`: ارسال قبلی در سامانه تأیید شده است.
+- `آپلود شد و در انتظار اسکن است`: آپلود انجام شده، اما اسکن هنوز تمام نشده
+  است؛ برنامه را باز نگه دارید.
+- `مهلت انتظار اسکن تمام شد`: برنامه را ببندید و دوباره با همان دستور اجرا
+  کنید؛ وضعیت قبلی از دیتابیس ادامه داده می‌شود و فایل دوباره آپلود نمی‌شود.
+- `rejected` یا `unknown`: برنامه عمداً فایل را به مرحله نهایی نمی‌فرستد. فایل
+  را نگه دارید و نتیجه اسکن یا محدودیت نوع فایل را با مسئول سامانه بررسی کنید.
+- `خطا برای ...`: متن کامل خطا را همراه با ساعت وقوع نگه دارید و پیش از تلاش
+  بعدی بررسی کنید.
+
+برای مشاهده فایل بایگانی‌شده اجرا کنید:
+
+```powershell
+Get-ChildItem -LiteralPath C:\FT-Test\_uploaded -File | Select-Object Name, Length, LastWriteTime
+```
+
+برای توقف امن برنامه، در پنجره PowerShell کلیدهای `Ctrl+C` را بزنید و منتظر
+پیام `پایش متوقف شد.` بمانید. بستن مستقیم پنجره فقط وقتی انجام شود که توقف
+عادی پاسخ نمی‌دهد.
+
+### ۵. اجرای تست در دفعات بعد
+
+در دفعات بعد نصب مجدد لازم نیست. فقط پوشه `C:\FT-Test` را بررسی کنید، یک فایل
+جدید در ریشه آن بگذارید و اجرا کنید:
+
+```powershell
+$ProjectDir = "C:\FT-Tools\ft.nioc.ir"
+Set-Location -LiteralPath $ProjectDir
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+& C:\venvs\ft-uploader\Scripts\Activate.ps1
+python ft_auto_uploader.py --watch-dir "C:\FT-Test"
+```
+
+پروفایل مرورگر و سابقه فایل‌های پردازش‌شده در مسیر زیر نگهداری می‌شوند:
+
+```text
+%LOCALAPPDATA%\ft-nioc-uploader
+```
+
+این پوشه را بین تست‌ها حذف نکنید؛ حذف آن باعث ازبین‌رفتن نشست مرورگر و سابقه
+تشخیص فایل‌های تکراری می‌شود.
 
 ## ساخت نسخه Portable کامل
 
