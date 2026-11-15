@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import re
 import shutil
 import sqlite3
 import time
@@ -26,6 +28,102 @@ QUARANTINE_URL = BASE_URL + "sarp-api/api/Scan/GetAllQuarantinedFilesList"
 QUEUE_URL = BASE_URL + "sarp-api/api/Scan/QueueForUploadFileFromQuarantineToSaman"
 UPLOAD_RESPONSE_SUFFIX = "/sarp-api/api/Scan/UploadFile"
 TEMP_SUFFIXES = {".crdownload", ".part", ".tmp"}
+NETWORK_DEBUG_NAME = "last-upload-network.console.txt"
+
+
+def _network_debug_path() -> Path:
+    return app_data_dir() / NETWORK_DEBUG_NAME
+
+
+def _write_network_debug(text: str, *, reset: bool = False) -> None:
+    """Best-effort diagnostic output; it must never affect an upload."""
+    try:
+        path = _network_debug_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w" if reset else "a", encoding="utf-8", newline="\n") as stream:
+            stream.write(text.rstrip() + "\n\n")
+    except OSError as error:
+        print(f"هشدار: فایل دستورات شبکه نوشته نشد: {error}")
+
+
+def _response_logging_lines() -> list[str]:
+    return [
+        "  const responseText = await response.text();",
+        "  console.log('HTTP status:', response.status);",
+        "  console.log('Response body:', responseText);",
+    ]
+
+
+def _build_upload_console_script(url: str, field_name: str = "file") -> str:
+    """Build a replayable upload without persisting cookies or file bytes."""
+    selector = "#main-page-blank > input"
+    return "\n".join(
+        [
+            "// Upload: run while signed in to ft.nioc.ir.",
+            "(async () => {",
+            f"  const existingInput = document.querySelector({json.dumps(selector)});",
+            "  let file = existingInput?.files?.[0];",
+            "  if (!file) {",
+            "    file = await new Promise((resolve, reject) => {",
+            "      const picker = document.createElement('input');",
+            "      picker.type = 'file';",
+            "      picker.onchange = () => picker.files?.[0] ? resolve(picker.files[0]) : reject(new Error('No file selected'));",
+            "      picker.click();",
+            "    });",
+            "  }",
+            "  const body = new FormData();",
+            f"  body.append({json.dumps(field_name)}, file, file.name);",
+            f"  const response = await fetch({json.dumps(url)}, {{",
+            "    method: 'POST',",
+            "    credentials: 'include',",
+            "    headers: {'accept': 'application/json, text/plain, */*'},",
+            "    body,",
+            "  });",
+            *_response_logging_lines(),
+            "})().catch((error) => console.error('Request failed:', error));",
+        ]
+    )
+
+
+def _build_api_console_script(
+    title: str, url: str, method: str, payload: dict | None = None
+) -> str:
+    headers = "{'accept': 'application/json, text/plain, */*'"
+    headers += ", 'content-type': 'application/json'}" if payload is not None else "}"
+    lines = [
+        f"// {title}: run while signed in to ft.nioc.ir.",
+        "(async () => {",
+        f"  const response = await fetch({json.dumps(url)}, {{",
+        f"    method: {json.dumps(method)},",
+        "    credentials: 'include',",
+        f"    headers: {headers},",
+    ]
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        lines.append(f"    body: JSON.stringify({body}),")
+    lines.extend(
+        [
+            "  });",
+            *_response_logging_lines(),
+            "})().catch((error) => console.error('Request failed:', error));",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _multipart_file_field(request) -> str:
+    try:
+        body = request.post_data_buffer or b""
+        match = re.search(
+            br'content-disposition:\s*form-data;\s*name="([^"]+)";\s*filename=',
+            body,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).decode("utf-8", errors="replace")
+    except Exception:
+        pass
+    return "file"
 
 
 def parse_args() -> argparse.Namespace:
@@ -221,6 +319,10 @@ def upload_file(page, path: Path) -> str:
         page.locator("div.v-card__actions button").nth(1).click()
 
     response = response_info.value
+    request = response.request
+    _write_network_debug(
+        _build_upload_console_script(request.url, _multipart_file_field(request))
+    )
     if not response.ok:
         raise RuntimeError(f"Upload failed with HTTP {response.status}")
     scan_file_id = response.json().get("scanFileId")
@@ -230,6 +332,7 @@ def upload_file(page, path: Path) -> str:
 
 
 def wait_for_scan(request_context, scan_file_id: str, timeout_seconds: float) -> tuple[str, dict | None]:
+    _write_network_debug(_build_api_console_script("Scan status", QUARANTINE_URL, "GET"))
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         response = request_context.get(QUARANTINE_URL)
@@ -252,6 +355,14 @@ def queue_clean_file(request_context, item: dict) -> None:
     scan_file_id = item.get("id")
     if not group_id or not scan_file_id:
         raise RuntimeError("Scan result is missing groupId or id")
+    _write_network_debug(
+        _build_api_console_script(
+            "Queue clean file",
+            QUEUE_URL,
+            "POST",
+            {"groupId": group_id, "scanFileId": scan_file_id},
+        )
+    )
     response = request_context.post(
         QUEUE_URL,
         data={"groupId": group_id, "scanFileId": scan_file_id},
@@ -269,6 +380,11 @@ def process_file(
     scan_timeout: float,
     emit=None,
 ) -> str:
+    _write_network_debug(
+        "// Network commands for the latest FT upload.\n"
+        "// Paste one JavaScript block at a time into the browser DevTools Console.",
+        reset=True,
+    )
     file_hash = fingerprint(path)
     row = connection.execute(
         "SELECT scan_file_id, status FROM uploads WHERE fingerprint = ?", (file_hash,)

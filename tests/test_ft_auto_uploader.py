@@ -4,12 +4,57 @@ from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 from ft_auto_uploader import (
+    _build_api_console_script,
+    _build_upload_console_script,
+    _multipart_file_field,
+    _write_network_debug,
     find_ready_files,
     parse_args,
     scan_result,
     select_files_for_run,
     wait_for_file_manager,
 )
+
+
+class NetworkDebugTest(unittest.TestCase):
+    def test_upload_script_uses_session_without_storing_sensitive_data(self):
+        script = _build_upload_console_script("https://ft.nioc.ir/upload", "upload")
+
+        self.assertIn("credentials: 'include'", script)
+        self.assertIn('body.append("upload", file, file.name)', script)
+        self.assertIn("response.status", script)
+        self.assertNotIn("authorization", script.lower())
+        self.assertNotIn("cookie", script.lower())
+
+    def test_queue_script_contains_required_payload(self):
+        script = _build_api_console_script(
+            "Queue", "https://ft.nioc.ir/queue", "POST", {"groupId": "G1", "scanFileId": "S1"}
+        )
+
+        self.assertIn('"groupId":"G1"', script)
+        self.assertIn('"scanFileId":"S1"', script)
+        self.assertIn("responseText", script)
+
+    def test_extracts_file_field_without_copying_body(self):
+        request = Mock()
+        request.post_data_buffer = (
+            b'Content-Disposition: form-data; name="document"; '
+            b'filename="report.pdf"\r\n\r\nprivate bytes'
+        )
+
+        self.assertEqual(_multipart_file_field(request), "document")
+
+    def test_debug_file_is_reset_then_appended(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "ft_auto_uploader.app_data_dir", return_value=Path(temp_dir)
+        ):
+            _write_network_debug("first", reset=True)
+            _write_network_debug("second")
+            text = (Path(temp_dir) / "last-upload-network.console.txt").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(text, "first\n\nsecond\n\n")
 
 
 class ReadyFilesTest(unittest.TestCase):
