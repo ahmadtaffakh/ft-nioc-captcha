@@ -601,6 +601,12 @@ class CaptchaLabApp:
         ).pack(side="left")
         self._button(
             toolbar,
+            "گزارش آپلودها",
+            self._load_upload_history,
+            "همه سوابق ثبت‌شده را با تفکیک وضعیت نمایش می‌دهد.",
+        ).pack(side="left", padx=8)
+        self._button(
+            toolbar,
             "پاک کردن نمایش",
             self._clear_log,
             "فقط متن قابل‌مشاهده را پاک می‌کند و اثری بر فایل‌ها یا تنظیمات ندارد.",
@@ -628,6 +634,41 @@ class CaptchaLabApp:
         self.output.tag_configure("error", foreground="#FDA29B")
         add_tooltip(self.output, "متن خروجی قابل انتخاب و کپی است؛ رمز عبور هرگز در این بخش ثبت نمی‌شود.")
         self._log("info", "برنامه آماده است؛ مرورگر در تمام عملیات باز می‌ماند.")
+
+    def _load_upload_history(self):
+        self._submit(
+            "upload_history",
+            self.browser.upload_history,
+            success=self._display_upload_history,
+        )
+
+    def _display_upload_history(self, records):
+        labels = {
+            "queued": "ارسال نهایی موفق",
+            "uploaded": "در انتظار اسکن",
+            "rejected": "ردشده",
+            "unknown": "نتیجه نامشخص",
+        }
+        counts = {status: 0 for status in labels}
+        for _, status, _ in records:
+            counts[status] = counts.get(status, 0) + 1
+        self._log(
+            "info",
+            "گزارش کل سوابق — "
+            f"موفق: {counts['queued']}، در انتظار اسکن: {counts['uploaded']}، "
+            f"ردشده: {counts['rejected']}، نامشخص: {counts['unknown']}",
+        )
+        if not records:
+            self._log("info", "هنوز سابقه‌ای ثبت نشده است.")
+        for source_path, status, updated_at in records:
+            changed_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(updated_at)
+            )
+            self._log(
+                "success" if status == "queued" else "warning",
+                f"{changed_at} | {labels.get(status, status)} | {source_path}",
+            )
+        self.status.set(f"گزارش {len(records)} سابقه نمایش داده شد.")
 
     def _build_upload_tab(self):
         upload = ttk.LabelFrame(
@@ -1071,6 +1112,8 @@ class CaptchaLabApp:
                 message = f"تشخیص: {text} — حداقل اطمینان: {confidence:.1%}"
                 self.status.set(message)
                 self._log("success", message)
+            elif operation == "upload_history":
+                pass
             elif operation in {"upload_folder", "auto_upload_folder"}:
                 if operation == "auto_upload_folder" and not any(payload.values()):
                     continue

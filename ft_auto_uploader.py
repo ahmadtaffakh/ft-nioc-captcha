@@ -255,6 +255,16 @@ def save_state(
     connection.commit()
 
 
+def list_upload_history(connection: sqlite3.Connection) -> list[tuple[str, str, int]]:
+    return connection.execute(
+        """
+        SELECT source_path, status, updated_at
+        FROM uploads
+        ORDER BY updated_at DESC, source_path
+        """
+    ).fetchall()
+
+
 def scan_result(item: dict) -> str:
     """Fail closed: only explicit clean results are accepted."""
     if item.get("fileScanState") == "SendingToSaman" or item.get("isEnqueued") is True:

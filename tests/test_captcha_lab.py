@@ -42,6 +42,20 @@ class CaptchaCaptureTest(unittest.TestCase):
 
 
 class BatchCaptureTest(unittest.TestCase):
+    def test_upload_history_reports_each_status(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app._log = Mock()
+        app.status = Mock()
+
+        app._display_upload_history(
+            [("report.pdf", "queued", 10), ("pending.pdf", "uploaded", 20)]
+        )
+
+        messages = [call.args[1] for call in app._log.call_args_list]
+        self.assertIn("موفق: 1", messages[0])
+        self.assertTrue(any("ارسال نهایی موفق" in message for message in messages))
+        self.assertTrue(any("در انتظار اسکن" in message for message in messages))
+
     def test_auto_upload_ticks_every_ten_seconds_and_skips_overlap(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
         app.root = Mock()

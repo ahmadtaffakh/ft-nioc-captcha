@@ -17,6 +17,7 @@ from captcha_training import (
     save_unlabeled_batch_sample,
 )
 from ft_auto_uploader import (
+    list_upload_history,
     list_candidate_files,
     open_state,
     process_file,
@@ -304,6 +305,13 @@ class BrowserSession:
         if stopped:
             result["stopped"] = True
         return result
+
+    def upload_history(self):
+        connection = open_state(self.profile_dir.parent / "state.db")
+        try:
+            return list_upload_history(connection)
+        finally:
+            connection.close()
 
     def close(self):
         if self.context is not None:

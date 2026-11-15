@@ -9,6 +9,8 @@ from ft_auto_uploader import (
     _multipart_file_field,
     _write_network_debug,
     find_ready_files,
+    list_upload_history,
+    open_state,
     parse_args,
     scan_result,
     select_files_for_run,
@@ -108,6 +110,23 @@ class ReadyFilesTest(unittest.TestCase):
         self.assertEqual(args.max_files_per_run, 5)
         self.assertEqual(args.max_file_size_mb, 12.5)
         self.assertTrue(args.run_once)
+
+
+class UploadHistoryTest(unittest.TestCase):
+    def test_history_is_newest_first(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            connection = open_state(Path(temp_dir) / "state.db")
+            connection.executemany(
+                "INSERT INTO uploads VALUES (?, ?, ?, ?, ?)",
+                [
+                    ("a", "old.pdf", "1", "queued", 10),
+                    ("b", "new.pdf", "2", "uploaded", 20),
+                ],
+            )
+            rows = list_upload_history(connection)
+            connection.close()
+
+        self.assertEqual(rows, [("new.pdf", "uploaded", 20), ("old.pdf", "queued", 10)])
 
 
 class ScanResultTest(unittest.TestCase):
