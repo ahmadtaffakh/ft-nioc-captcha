@@ -1,0 +1,208 @@
+"""Persistent non-secret settings and Windows-protected FT credentials."""
+
+from __future__ import annotations
+
+import base64
+import ctypes
+import json
+import os
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
+from ctypes import wintypes
+
+
+APP_VERSION = "0.2.0"
+SETTINGS_FILENAME = "settings.json"
+CREDENTIALS_FILENAME = "credentials.dat"
+_CRYPTPROTECT_UI_FORBIDDEN = 0x1
+
+
+@dataclass(frozen=True)
+class AppSettings:
+    selector: str = "img[src^='data:image/']"
+    sequence_length: int = 5
+    batch_count: int = 1000
+    reload_delay_seconds: float = 1.0
+    epochs: int = 40
+    minimum_confidence: float = 0.75
+
+    def validate(self) -> None:
+        if not 1 <= self.sequence_length <= 10:
+            raise ValueError("تعداد ارقام باید بین ۱ و ۱۰ باشد.")
+        if not 1 <= self.batch_count <= 10000:
+            raise ValueError("تعداد Batch باید بین ۱ و ۱۰۰۰۰ باشد.")
+        if not 0 <= self.reload_delay_seconds <= 60:
+            raise ValueError("تأخیر Reload باید بین صفر و ۶۰ ثانیه باشد.")
+        if not 1 <= self.epochs <= 500:
+            raise ValueError("Epoch باید بین ۱ و ۵۰۰ باشد.")
+        if not 0 <= self.minimum_confidence <= 1:
+            raise ValueError("حداقل اطمینان باید بین صفر و یک باشد.")
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [
+        ("cbData", wintypes.DWORD),
+        ("pbData", ctypes.POINTER(wintypes.BYTE)),
+    ]
+
+
+def load_settings(base_dir: Path) -> AppSettings:
+    path = Path(base_dir) / SETTINGS_FILENAME
+    if not path.exists():
+        return AppSettings()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("فایل تنظیمات معتبر نیست.") from error
+    if not isinstance(payload, dict):
+        raise ValueError("ساختار فایل تنظیمات معتبر نیست.")
+    allowed = {field.name for field in fields(AppSettings)}
+    try:
+        settings = AppSettings(**{key: value for key, value in payload.items() if key in allowed})
+        settings.validate()
+    except (TypeError, ValueError) as error:
+        raise ValueError("مقادیر فایل تنظیمات معتبر نیست.") from error
+    return settings
+
+
+def save_settings(base_dir: Path, settings: AppSettings) -> Path:
+    settings.validate()
+    base_dir = Path(base_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = base_dir / SETTINGS_FILENAME
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(asdict(settings), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
+
+
+def _crypt32():
+    if os.name != "nt":
+        raise RuntimeError("ذخیره امن رمز فقط در Windows پشتیبانی می‌شود.")
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DataBlob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_DataBlob),
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(_DataBlob),
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DataBlob),
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(_DataBlob),
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(_DataBlob),
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    return crypt32, kernel32
+
+
+def _blob(data: bytes) -> tuple[_DataBlob, ctypes.Array]:
+    buffer = ctypes.create_string_buffer(data)
+    return (
+        _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(wintypes.BYTE))),
+        buffer,
+    )
+
+
+def protect_secret(data: bytes) -> bytes:
+    crypt32, kernel32 = _crypt32()
+    source, source_buffer = _blob(data)
+    protected = _DataBlob()
+    try:
+        succeeded = crypt32.CryptProtectData(
+            ctypes.byref(source),
+            "FT NIOC Uploader",
+            None,
+            None,
+            None,
+            _CRYPTPROTECT_UI_FORBIDDEN,
+            ctypes.byref(protected),
+        )
+        if not succeeded:
+            raise ctypes.WinError()
+        return ctypes.string_at(protected.pbData, protected.cbData)
+    finally:
+        ctypes.memset(source_buffer, 0, len(source_buffer))
+        if protected.pbData:
+            kernel32.LocalFree(protected.pbData)
+
+
+def unprotect_secret(data: bytes) -> bytes:
+    crypt32, kernel32 = _crypt32()
+    source, source_buffer = _blob(data)
+    clear = _DataBlob()
+    try:
+        succeeded = crypt32.CryptUnprotectData(
+            ctypes.byref(source),
+            None,
+            None,
+            None,
+            None,
+            _CRYPTPROTECT_UI_FORBIDDEN,
+            ctypes.byref(clear),
+        )
+        if not succeeded:
+            raise ValueError("اطلاعات ورود ذخیره‌شده قابل بازیابی نیست.")
+        return ctypes.string_at(clear.pbData, clear.cbData)
+    finally:
+        ctypes.memset(source_buffer, 0, len(source_buffer))
+        if clear.pbData:
+            kernel32.LocalFree(clear.pbData)
+
+
+def save_credentials(base_dir: Path, username: str, password: str) -> Path:
+    if not username or not password:
+        raise ValueError("نام کاربری و رمز عبور نباید خالی باشند.")
+    payload = json.dumps(
+        {"username": username, "password": password},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    protected = protect_secret(payload)
+    encoded = base64.b64encode(protected)
+    base_dir = Path(base_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = base_dir / CREDENTIALS_FILENAME
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(encoded)
+    os.replace(temporary, path)
+    return path
+
+
+def load_credentials(base_dir: Path) -> tuple[str, str] | None:
+    path = Path(base_dir) / CREDENTIALS_FILENAME
+    if not path.exists():
+        return None
+    try:
+        protected = base64.b64decode(path.read_bytes(), validate=True)
+        payload = json.loads(unprotect_secret(protected).decode("utf-8"))
+        username = payload["username"]
+        password = payload["password"]
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError("اطلاعات ورود ذخیره‌شده معتبر نیست.") from error
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise ValueError("اطلاعات ورود ذخیره‌شده معتبر نیست.")
+    if not username or not password:
+        raise ValueError("اطلاعات ورود ذخیره‌شده خالی است.")
+    return username, password
+
+
+def delete_credentials(base_dir: Path) -> bool:
+    path = Path(base_dir) / CREDENTIALS_FILENAME
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+

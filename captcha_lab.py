@@ -27,12 +27,21 @@ from ft_runtime import (
     RuntimeResult,
     capture_captcha_bytes,
 )
+from ft_settings import (
+    APP_VERSION,
+    AppSettings,
+    delete_credentials,
+    load_credentials,
+    load_settings,
+    save_credentials,
+    save_settings,
+)
 
 
 class CaptchaLabApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("آزمایشگاه CAPTCHA سامانه FT")
+        self.root.title(f"آزمایشگاه CAPTCHA سامانه FT — نسخه {APP_VERSION}")
         self.root.geometry("920x860")
         self.root.minsize(820, 720)
         self.base_dir = app_data_dir()
@@ -45,20 +54,42 @@ class CaptchaLabApp:
         self.current_image = None
         self.preview_reference = None
         self.closing = False
+        self.startup_warnings = []
 
-        self.selector = tk.StringVar(value=DEFAULT_CAPTCHA_SELECTOR)
+        try:
+            settings = load_settings(self.base_dir)
+        except ValueError as error:
+            settings = AppSettings()
+            self.startup_warnings.append(str(error))
+
+        stored_username = ""
+        stored_password = ""
+        try:
+            credentials = load_credentials(self.base_dir)
+        except ValueError as error:
+            self.startup_warnings.append(str(error))
+        else:
+            if credentials:
+                stored_username, stored_password = credentials
+
+        self.selector = tk.StringVar(value=settings.selector or DEFAULT_CAPTCHA_SELECTOR)
         self.label = tk.StringVar()
-        self.sequence_length = tk.IntVar(value=5)
-        self.batch_count = tk.IntVar(value=1000)
-        self.reload_delay_seconds = tk.DoubleVar(value=1.0)
-        self.epochs = tk.IntVar(value=40)
-        self.minimum_confidence = tk.DoubleVar(value=0.75)
-        self.username = tk.StringVar()
-        self.password = tk.StringVar()
+        self.sequence_length = tk.IntVar(value=settings.sequence_length)
+        self.batch_count = tk.IntVar(value=settings.batch_count)
+        self.reload_delay_seconds = tk.DoubleVar(value=settings.reload_delay_seconds)
+        self.epochs = tk.IntVar(value=settings.epochs)
+        self.minimum_confidence = tk.DoubleVar(value=settings.minimum_confidence)
+        self.username = tk.StringVar(value=stored_username)
+        self.password = tk.StringVar(value=stored_password)
+        self.remember_credentials = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="آماده")
         self.sample_count = tk.StringVar()
 
         self._build_ui()
+        for warning in self.startup_warnings:
+            self._log("warning", warning)
+        if stored_username:
+            self._log("info", "اطلاعات ورود امن برای این حساب Windows بازیابی شد.")
         self._update_sample_count()
         self.root.after(100, self._poll_results)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -143,6 +174,21 @@ class CaptchaLabApp:
         ttk.Button(login, text="ورود خودکار (حداکثر ۳ تلاش)", command=self._login).grid(
             row=1, column=3, pady=6, padx=4
         )
+        ttk.Checkbutton(
+            login,
+            text="ذخیره امن پس از ورود موفق",
+            variable=self.remember_credentials,
+        ).grid(row=2, column=0, columnspan=2, sticky="e", pady=4)
+        ttk.Button(login, text="ذخیره تنظیمات", command=self._save_preferences).grid(
+            row=2, column=2, pady=4, padx=4
+        )
+        ttk.Button(login, text="پاک کردن اطلاعات ورود", command=self._forget_credentials).grid(
+            row=2, column=3, pady=4, padx=4
+        )
+        ttk.Label(
+            login,
+            text="رمز با Windows DPAPI محافظت می‌شود و در خروجی نمایش داده نمی‌شود.",
+        ).grid(row=3, column=0, columnspan=4, pady=(2, 0))
 
         ttk.Separator(container).pack(fill="x", pady=6)
         ttk.Label(container, textvariable=self.status, anchor="center").pack(fill="x")
@@ -167,6 +213,7 @@ class CaptchaLabApp:
         self.output.tag_configure("warning", foreground="#9A6700")
         self.output.tag_configure("error", foreground="#C62828")
         self._log("info", "برنامه آماده است؛ مرورگر در تمام عملیات باز می‌ماند.")
+        ttk.Label(container, text=f"نسخه {APP_VERSION}", anchor="w").pack(fill="x", pady=(4, 0))
 
     def _log(self, level, message):
         timestamp = time.strftime("%H:%M:%S")
@@ -185,6 +232,52 @@ class CaptchaLabApp:
         self.output.configure(state="normal")
         self.output.delete("1.0", "end")
         self.output.configure(state="disabled")
+
+    def _current_settings(self):
+        try:
+            settings = AppSettings(
+                selector=self.selector.get(),
+                sequence_length=self.sequence_length.get(),
+                batch_count=self.batch_count.get(),
+                reload_delay_seconds=self.reload_delay_seconds.get(),
+                epochs=self.epochs.get(),
+                minimum_confidence=self.minimum_confidence.get(),
+            )
+            settings.validate()
+        except (tk.TclError, ValueError) as error:
+            raise ValueError(str(error) or "مقادیر تنظیمات معتبر نیستند.") from error
+        return settings
+
+    def _save_preferences(self, announce=True):
+        try:
+            save_settings(self.base_dir, self._current_settings())
+        except (OSError, ValueError) as error:
+            if announce:
+                self._log("error", f"ذخیره تنظیمات ناموفق بود: {error}")
+                messagebox.showerror("خطا", str(error))
+            return False
+        if announce:
+            self.status.set("تنظیمات ذخیره شد.")
+            self._log("success", "تنظیمات غیرحساس ذخیره شد.")
+        return True
+
+    def _forget_credentials(self):
+        if not messagebox.askyesno(
+            "پاک کردن اطلاعات ورود",
+            "نام کاربری و رمز ذخیره‌شده از این حساب Windows پاک شود؟",
+        ):
+            return
+        try:
+            removed = delete_credentials(self.base_dir)
+        except OSError as error:
+            self._log("error", f"پاک کردن اطلاعات ورود ناموفق بود: {error}")
+            messagebox.showerror("خطا", str(error))
+            return
+        self.username.set("")
+        self.password.set("")
+        message = "اطلاعات ورود ذخیره‌شده پاک شد." if removed else "اطلاعات ورودی ذخیره نشده بود."
+        self.status.set(message)
+        self._log("warning" if removed else "info", message)
 
     def _submit(self, operation_name, operation, *args, success=None):
         self.status.set("در حال انجام...")
@@ -217,6 +310,7 @@ class CaptchaLabApp:
         if not 0 <= reload_delay <= 60:
             messagebox.showerror("خطا", "تأخیر Reload باید بین صفر و ۶۰ ثانیه باشد.")
             return
+        self._save_preferences(announce=False)
         batch_dir = self.batch_root / f"batch-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1000:03d}"
         self._submit(
             "collect_batch",
@@ -345,6 +439,7 @@ class CaptchaLabApp:
         if not 0 <= minimum_confidence <= 1:
             messagebox.showerror("خطا", "حداقل اطمینان باید بین صفر و یک باشد.")
             return
+        self._save_preferences(announce=False)
         self._submit(
             "login",
             self.browser.login,
@@ -353,7 +448,19 @@ class CaptchaLabApp:
             self.selector.get(),
             self.model_dir,
             minimum_confidence,
+            success=self._after_login,
         )
+
+    def _after_login(self, message):
+        if not self.remember_credentials.get() or not message.startswith("ورود موفق"):
+            return
+        try:
+            save_credentials(self.base_dir, self.username.get(), self.password.get())
+        except (OSError, RuntimeError, ValueError) as error:
+            self._log("error", f"ذخیره امن اطلاعات ورود ناموفق بود: {error}")
+            messagebox.showerror("خطا", str(error))
+            return
+        self._log("success", "نام کاربری و رمز به‌صورت امن برای این حساب Windows ذخیره شد.")
 
     def _poll_results(self):
         while True:
@@ -415,6 +522,7 @@ class CaptchaLabApp:
             "مرورگر بین عملیات باز می‌ماند. با خروج کامل از برنامه، مرورگر هم بسته می‌شود. ادامه می‌دهید؟",
         ):
             return
+        self._save_preferences(announce=False)
         self.closing = True
         self.browser.cancel_batch()
         self.status.set("در حال بستن مرورگر...")

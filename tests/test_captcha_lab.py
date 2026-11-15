@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
+from captcha_lab import CaptchaLabApp
 from ft_runtime import BrowserSession, capture_captcha_bytes
 
 
@@ -136,6 +137,36 @@ class BatchCaptureTest(unittest.TestCase):
             wait_until="domcontentloaded",
         )
         self.assertIn("ورود دستی", message)
+
+
+class CredentialPersistenceTest(unittest.TestCase):
+    def test_successful_automatic_login_saves_credentials(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.remember_credentials = Mock()
+        app.remember_credentials.get.return_value = True
+        app.base_dir = Path("app-data")
+        app.username = Mock()
+        app.username.get.return_value = "user"
+        app.password = Mock()
+        app.password.get.return_value = "password"
+        app._log = Mock()
+
+        with patch("captcha_lab.save_credentials") as save:
+            app._after_login("ورود موفق؛ CAPTCHA: 12345")
+
+        save.assert_called_once_with(Path("app-data"), "user", "password")
+        logged_messages = [call.args[1] for call in app._log.call_args_list]
+        self.assertNotIn("password", " ".join(logged_messages))
+
+    def test_unverified_existing_session_does_not_save_credentials(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.remember_credentials = Mock()
+        app.remember_credentials.get.return_value = True
+
+        with patch("captcha_lab.save_credentials") as save:
+            app._after_login("ورود قبلاً انجام شده است.")
+
+        save.assert_not_called()
 
 
 if __name__ == "__main__":
