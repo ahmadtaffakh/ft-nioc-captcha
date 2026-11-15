@@ -28,6 +28,7 @@ class AppSettings:
     watch_dir: str = ""
     max_files_per_run: int = 10
     max_file_size_mb: float = 100.0
+    auto_upload_enabled: bool = True
 
     def validate(self) -> None:
         if not 1 <= self.sequence_length <= 10:
@@ -44,6 +45,8 @@ class AppSettings:
             raise ValueError("سقف تعداد فایل باید بین صفر و ۱۰۰۰۰ باشد.")
         if not 0 <= self.max_file_size_mb <= 100000:
             raise ValueError("سقف حجم فایل باید بین صفر و ۱۰۰۰۰۰ مگابایت باشد.")
+        if not isinstance(self.auto_upload_enabled, bool):
+            raise ValueError("وضعیت آپلود خودکار معتبر نیست.")
 
 
 class _DataBlob(ctypes.Structure):

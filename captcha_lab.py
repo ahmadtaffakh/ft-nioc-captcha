@@ -54,6 +54,8 @@ COLORS = {
     "log_text": "#E5E7EB",
 }
 
+AUTO_UPLOAD_INTERVAL_MS = 10_000
+
 
 def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
     """Attach a keyboard- and mouse-accessible tooltip to one Tk widget."""
@@ -123,6 +125,9 @@ class CaptchaLabApp:
         self.current_image = None
         self.preview_reference = None
         self.closing = False
+        self.upload_task_id = None
+        self.auto_upload_suspended = False
+        self.auto_upload_warning = None
         self.startup_warnings = []
 
         try:
@@ -151,6 +156,7 @@ class CaptchaLabApp:
         self.watch_dir = tk.StringVar(value=settings.watch_dir)
         self.max_files_per_run = tk.IntVar(value=settings.max_files_per_run)
         self.max_file_size_mb = tk.DoubleVar(value=settings.max_file_size_mb)
+        self.auto_upload_enabled = tk.BooleanVar(value=settings.auto_upload_enabled)
         self.username = tk.StringVar(value=stored_username)
         self.password = tk.StringVar(value=stored_password)
         self.remember_credentials = tk.BooleanVar(value=True)
@@ -164,6 +170,7 @@ class CaptchaLabApp:
             self._log("info", "اطلاعات ورود امن برای این حساب Windows بازیابی شد.")
         self._update_sample_count()
         self.root.after(100, self._poll_results)
+        self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
@@ -676,6 +683,14 @@ class CaptchaLabApp:
             "فایل‌های مجاز را آپلود، نتیجه اسکن را بررسی و موارد موفق را در _uploaded بایگانی می‌کند.",
             "Primary.TButton",
         ).grid(row=2, column=2, columnspan=2, padx=6, pady=18, sticky="ew")
+        auto_upload = ttk.Checkbutton(
+            upload,
+            text="آپلود خودکار هر ۱۰ ثانیه",
+            variable=self.auto_upload_enabled,
+            command=self._toggle_auto_upload,
+        )
+        auto_upload.grid(row=2, column=0, columnspan=2, padx=8, pady=18, sticky="e")
+        add_tooltip(auto_upload, "هنگام اجرای Upload قبلی، اجرای جدید شروع نمی‌شود.")
         ttk.Label(
             upload,
             text="فایل‌های موقت نادیده گرفته می‌شوند. فقط نتیجه صریحاً سالم به مرحله نهایی ارسال می‌شود.",
@@ -693,30 +708,63 @@ class CaptchaLabApp:
         )
         if selected:
             self.watch_dir.set(selected)
+            self.auto_upload_warning = None
             self._save_preferences(announce=False)
 
-    def _upload_folder(self):
+    def _toggle_auto_upload(self):
+        self.auto_upload_suspended = False
+        self.auto_upload_warning = None
+        self._save_preferences(announce=False)
+        state = "فعال" if self.auto_upload_enabled.get() else "غیرفعال"
+        self._log("info", f"آپلود خودکار {state} شد.")
+
+    def _auto_upload_tick(self):
+        if self.closing:
+            return
+        if self.auto_upload_enabled.get() and not self.auto_upload_suspended:
+            self._upload_folder(automatic=True)
+        self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
+
+    def _upload_folder(self, automatic=False):
+        if self.upload_task_id is not None:
+            if not automatic:
+                self._log("info", "یک عملیات آپلود در حال اجرا است؛ درخواست تکراری نادیده گرفته شد.")
+            return
         try:
             folder = Path(self.watch_dir.get()).expanduser()
             max_files = self.max_files_per_run.get()
             max_size = self.max_file_size_mb.get()
         except tk.TclError:
-            messagebox.showerror("خطا", "محدودیت تعداد و حجم باید عددی باشند.")
+            if not automatic:
+                messagebox.showerror("خطا", "محدودیت تعداد و حجم باید عددی باشند.")
             return
         if not folder.is_dir():
-            messagebox.showerror("خطا", "ابتدا یک پوشه معتبر انتخاب کنید.")
+            if automatic:
+                warning = str(folder)
+                if self.auto_upload_warning != warning:
+                    self._log("warning", "آپلود خودکار منتظر انتخاب یک پوشه معتبر است.")
+                    self.auto_upload_warning = warning
+            else:
+                messagebox.showerror("خطا", "ابتدا یک پوشه معتبر انتخاب کنید.")
             return
         if max_files < 0 or max_size < 0:
-            messagebox.showerror("خطا", "محدودیت تعداد و حجم نباید منفی باشد.")
+            if not automatic:
+                messagebox.showerror("خطا", "محدودیت تعداد و حجم نباید منفی باشد.")
             return
+        self.auto_upload_warning = None
+        if not automatic:
+            self.auto_upload_suspended = False
         self._save_preferences(announce=False)
-        self.notebook.select(self.output_tab)
-        self._submit(
-            "upload_folder",
+        if not automatic:
+            self.notebook.select(self.output_tab)
+        operation = "auto_upload_folder" if automatic else "upload_folder"
+        self.upload_task_id = self._submit(
+            operation,
             self.browser.upload_folder,
             folder,
             max_files,
             max_size,
+            announce=not automatic,
         )
 
     def _log(self, level, message):
@@ -749,6 +797,7 @@ class CaptchaLabApp:
                 watch_dir=self.watch_dir.get(),
                 max_files_per_run=self.max_files_per_run.get(),
                 max_file_size_mb=self.max_file_size_mb.get(),
+                auto_upload_enabled=self.auto_upload_enabled.get(),
             )
             settings.validate()
         except (tk.TclError, ValueError) as error:
@@ -786,11 +835,13 @@ class CaptchaLabApp:
         self.status.set(message)
         self._log("warning" if removed else "info", message)
 
-    def _submit(self, operation_name, operation, *args, success=None):
-        self.status.set("در حال انجام...")
-        self._log("info", f"شروع عملیات: {operation_name}")
+    def _submit(self, operation_name, operation, *args, success=None, announce=True):
+        if announce:
+            self.status.set("در حال انجام...")
+            self._log("info", f"شروع عملیات: {operation_name}")
         task_id = self.browser.submit(operation_name, operation, *args)
         self.callbacks[task_id] = success
+        return task_id
 
     def _open_browser(self):
         self._submit("open", self.browser.open)
@@ -984,6 +1035,8 @@ class CaptchaLabApp:
             succeeded = result.succeeded
             payload = result.payload
             callback = self.callbacks.pop(task_id, None)
+            if task_id == self.upload_task_id:
+                self.upload_task_id = None
             if operation == "close":
                 self.browser.executor.shutdown(wait=False, cancel_futures=True)
                 self.root.destroy()
@@ -991,7 +1044,8 @@ class CaptchaLabApp:
             if not succeeded:
                 self.status.set("عملیات ناموفق بود.")
                 self._log("error", f"{operation}: {payload}")
-                messagebox.showerror("خطا", payload)
+                if operation != "auto_upload_folder":
+                    messagebox.showerror("خطا", payload)
                 continue
             if callback:
                 callback(payload)
@@ -1017,13 +1071,17 @@ class CaptchaLabApp:
                 message = f"تشخیص: {text} — حداقل اطمینان: {confidence:.1%}"
                 self.status.set(message)
                 self._log("success", message)
-            elif operation == "upload_folder":
+            elif operation in {"upload_folder", "auto_upload_folder"}:
+                if operation == "auto_upload_folder" and not any(payload.values()):
+                    continue
                 message = (
                     f"اجرای آپلود تمام شد؛ پردازش: {payload['processed']}، "
                     f"خطا: {payload['failed']}، عبور از سقف حجم: {payload['oversized']}"
                 )
                 if payload.get("stopped"):
                     message += " — توقف پس از دو خطای پیاپی"
+                    self.auto_upload_suspended = True
+                    message += "؛ پایش خودکار متوقف شد"
                 self.status.set(message)
                 self._log("success" if payload["failed"] == 0 else "warning", message)
             elif isinstance(payload, str):

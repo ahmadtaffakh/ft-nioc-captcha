@@ -10,7 +10,7 @@ from unittest.mock import Mock, call, patch
 import tkinter as tk
 from tkinter import ttk
 
-from captcha_lab import CaptchaLabApp
+from captcha_lab import AUTO_UPLOAD_INTERVAL_MS, CaptchaLabApp
 from ft_runtime import BrowserSession, capture_captcha_bytes
 
 
@@ -42,6 +42,29 @@ class CaptchaCaptureTest(unittest.TestCase):
 
 
 class BatchCaptureTest(unittest.TestCase):
+    def test_auto_upload_ticks_every_ten_seconds_and_skips_overlap(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.root = Mock()
+        app.closing = False
+        app.auto_upload_suspended = False
+        app.auto_upload_enabled = Mock()
+        app.auto_upload_enabled.get.return_value = True
+        app._upload_folder = Mock()
+
+        app._auto_upload_tick()
+
+        app._upload_folder.assert_called_once_with(automatic=True)
+        app.root.after.assert_called_once_with(
+            AUTO_UPLOAD_INTERVAL_MS, app._auto_upload_tick
+        )
+
+        app.upload_task_id = "upload-1"
+        app._log = Mock()
+        app.browser = Mock()
+        app._upload_folder = CaptchaLabApp._upload_folder.__get__(app)
+        app._upload_folder(automatic=True)
+        app.browser.upload_folder.assert_not_called()
+
     def test_collects_requested_images_and_refreshes_between_them(self):
         with tempfile.TemporaryDirectory() as temporary:
             session = BrowserSession(Path(temporary) / "profile", queue.Queue())

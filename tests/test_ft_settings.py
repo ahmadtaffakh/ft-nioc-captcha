@@ -23,6 +23,7 @@ class SettingsTest(unittest.TestCase):
 
         self.assertEqual(settings.reload_delay_seconds, 1.0)
         self.assertEqual(settings.batch_count, 1000)
+        self.assertTrue(settings.auto_upload_enabled)
 
     def test_settings_round_trip_and_ignore_future_fields(self):
         with tempfile.TemporaryDirectory() as temporary:
