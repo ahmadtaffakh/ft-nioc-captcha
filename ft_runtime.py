@@ -16,6 +16,13 @@ from captcha_training import (
     predict_image,
     save_unlabeled_batch_sample,
 )
+from ft_auto_uploader import (
+    list_candidate_files,
+    open_state,
+    process_file,
+    select_files_for_run,
+    wait_for_file_manager,
+)
 from ft_browser import launch_persistent_session
 
 
@@ -34,6 +41,14 @@ class RuntimeResult:
     operation: str
     succeeded: bool
     payload: Any
+
+
+@dataclass(frozen=True)
+class RuntimeLog:
+    """One live log entry emitted by a background operation."""
+
+    level: str
+    message: str
 
 
 def _captcha_locator(page, preferred_selector: str):
@@ -90,7 +105,9 @@ def capture_captcha_bytes(page, selector: str) -> bytes:
 class BrowserSession:
     """Serialize all synchronous Playwright access on one browser thread."""
 
-    def __init__(self, profile_dir: Path, results: queue.Queue[RuntimeResult]):
+    def __init__(
+        self, profile_dir: Path, results: queue.Queue[RuntimeResult | RuntimeLog]
+    ):
         self.profile_dir = Path(profile_dir)
         self.results = results
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ft-browser")
@@ -113,6 +130,9 @@ class BrowserSession:
 
         future.add_done_callback(completed)
         return task_id
+
+    def _emit(self, level: str, message: str) -> None:
+        self.results.put(RuntimeLog(level, message))
 
     def open(self):
         if self.context is None:
@@ -208,6 +228,66 @@ class BrowserSession:
                 if attempt < 3:
                     self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
         raise RuntimeError(f"ورود پس از ۳ تلاش موفق نشد؛ آخرین تشخیص: {last_prediction}")
+
+    def upload_folder(
+        self,
+        folder: Path,
+        max_files: int,
+        max_file_size_mb: float,
+        scan_timeout_minutes: float = 30.0,
+        login_timeout_minutes: float = 15.0,
+    ):
+        folder = Path(folder)
+        if not folder.is_dir():
+            raise ValueError("پوشه انتخاب‌شده وجود ندارد.")
+        if max_files < 0 or max_file_size_mb < 0:
+            raise ValueError("محدودیت تعداد و حجم نباید منفی باشد.")
+        if self.page is None:
+            self.open()
+
+        def manual_login(upload_button, timeout_ms):
+            self._emit("warning", "ورود لازم است؛ ورود دستی را در مرورگر کامل کنید.")
+            upload_button.wait_for(state="visible", timeout=timeout_ms)
+
+        wait_for_file_manager(
+            self.page,
+            int(login_timeout_minutes * 60_000),
+            manual_login,
+        )
+        selected, oversized = select_files_for_run(
+            list_candidate_files(folder),
+            max_files,
+            int(max_file_size_mb * 1024 * 1024),
+        )
+        for path in oversized:
+            self._emit("warning", f"به‌دلیل عبور از سقف حجم رد شد: {path.name}")
+        if not selected:
+            return {"processed": 0, "failed": 0, "oversized": len(oversized)}
+
+        connection = open_state(self.profile_dir.parent / "state.db")
+        failed = 0
+        try:
+            for path in selected:
+                try:
+                    process_file(
+                        connection,
+                        self.context,
+                        self.page,
+                        path,
+                        folder / "_uploaded",
+                        scan_timeout_minutes * 60,
+                        self._emit,
+                    )
+                except Exception as error:
+                    failed += 1
+                    self._emit("error", f"خطا برای {path.name}: {error}")
+        finally:
+            connection.close()
+        return {
+            "processed": len(selected),
+            "failed": failed,
+            "oversized": len(oversized),
+        }
 
     def close(self):
         if self.context is not None:

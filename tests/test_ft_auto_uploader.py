@@ -3,7 +3,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from ft_auto_uploader import find_ready_files, scan_result, wait_for_file_manager
+from ft_auto_uploader import (
+    find_ready_files,
+    parse_args,
+    scan_result,
+    select_files_for_run,
+    wait_for_file_manager,
+)
 
 
 class ReadyFilesTest(unittest.TestCase):
@@ -20,6 +26,43 @@ class ReadyFilesTest(unittest.TestCase):
             self.assertEqual(
                 find_ready_files(folder, observations, 5, now=15), [complete]
             )
+
+    def test_count_and_size_limits_are_applied(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            small = folder / "a.pdf"
+            medium = folder / "b.pdf"
+            large = folder / "c.pdf"
+            small.write_bytes(b"a" * 10)
+            medium.write_bytes(b"b" * 20)
+            large.write_bytes(b"c" * 30)
+
+            selected, oversized = select_files_for_run(
+                [small, medium, large], max_files=1, max_size_bytes=25
+            )
+
+            self.assertEqual(selected, [small])
+            self.assertEqual(oversized, [large])
+
+    def test_cli_accepts_upload_limits_and_run_once(self):
+        with patch(
+            "sys.argv",
+            [
+                "ft_auto_uploader.py",
+                "--watch-dir",
+                "C:\\FT-Test",
+                "--max-files-per-run",
+                "5",
+                "--max-file-size-mb",
+                "12.5",
+                "--run-once",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.max_files_per_run, 5)
+        self.assertEqual(args.max_file_size_mb, 12.5)
+        self.assertTrue(args.run_once)
 
 
 class ScanResultTest(unittest.TestCase):

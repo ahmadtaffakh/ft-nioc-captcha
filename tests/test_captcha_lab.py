@@ -141,6 +141,20 @@ class BatchCaptureTest(unittest.TestCase):
         )
         self.assertIn("ورود دستی", message)
 
+    def test_empty_upload_folder_finishes_without_database_work(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = BrowserSession(Path(temporary) / "profile", queue.Queue())
+            session.page = Mock()
+            session.context = Mock()
+            try:
+                with patch("ft_runtime.wait_for_file_manager") as wait:
+                    result = session.upload_folder(Path(temporary), 5, 10)
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
+            wait.assert_called_once()
+            self.assertEqual(result, {"processed": 0, "failed": 0, "oversized": 0})
+
 
 class CredentialPersistenceTest(unittest.TestCase):
     def test_successful_automatic_login_saves_credentials(self):
@@ -190,7 +204,13 @@ class OrganizationalUiTest(unittest.TestCase):
         names = [self.app.notebook.tab(tab, "text").strip() for tab in self.app.notebook.tabs()]
         self.assertEqual(
             names,
-            ["اتصال و CAPTCHA", "داده و آموزش", "ورود سامانه", "خروجی و گزارش"],
+            [
+                "اتصال و CAPTCHA",
+                "داده و آموزش",
+                "ورود سامانه",
+                "آپلود فایل",
+                "خروجی و گزارش",
+            ],
         )
 
     def test_every_action_button_has_a_tooltip(self):

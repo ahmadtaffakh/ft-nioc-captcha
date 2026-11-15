@@ -35,7 +35,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=3.0)
     parser.add_argument("--scan-timeout-minutes", type=float, default=30.0)
     parser.add_argument("--login-timeout-minutes", type=float, default=15.0)
+    parser.add_argument(
+        "--max-files-per-run",
+        type=int,
+        default=0,
+        help="Maximum files per cycle; 0 means unlimited.",
+    )
+    parser.add_argument(
+        "--max-file-size-mb",
+        type=float,
+        default=0.0,
+        help="Maximum size of each file in MiB; 0 means unlimited.",
+    )
+    parser.add_argument(
+        "--run-once",
+        action="store_true",
+        help="Process one stable-file cycle and exit.",
+    )
     return parser.parse_args()
+
+
+def list_candidate_files(folder: Path) -> list[Path]:
+    return [
+        path
+        for path in sorted(Path(folder).iterdir())
+        if path.is_file() and path.suffix.lower() not in TEMP_SUFFIXES
+    ]
 
 
 def find_ready_files(
@@ -49,9 +74,7 @@ def find_ready_files(
     current_paths = set()
     ready = []
 
-    for path in sorted(folder.iterdir()):
-        if not path.is_file() or path.suffix.lower() in TEMP_SUFFIXES:
-            continue
+    for path in list_candidate_files(folder):
         current_paths.add(path)
         stat = path.stat()
         previous = observations.get(path)
@@ -66,6 +89,26 @@ def find_ready_files(
     for missing in set(observations) - current_paths:
         observations.pop(missing, None)
     return ready
+
+
+def select_files_for_run(
+    paths: list[Path], max_files: int = 0, max_size_bytes: int = 0
+) -> tuple[list[Path], list[Path]]:
+    """Apply optional count and size limits while preserving path order."""
+    if max_files < 0 or max_size_bytes < 0:
+        raise ValueError("محدودیت تعداد و حجم نباید منفی باشد.")
+    oversized = [path for path in paths if max_size_bytes and path.stat().st_size > max_size_bytes]
+    accepted = [path for path in paths if path not in oversized]
+    if max_files:
+        accepted = accepted[:max_files]
+    return accepted, oversized
+
+
+def _report(emit, level: str, message: str) -> None:
+    if emit is None:
+        print(message)
+    else:
+        emit(level, message)
 
 
 def fingerprint(path: Path) -> str:
@@ -217,7 +260,15 @@ def queue_clean_file(request_context, item: dict) -> None:
         raise RuntimeError(f"Queue request failed with HTTP {response.status}")
 
 
-def process_file(connection, context, page, path: Path, archive_dir: Path, scan_timeout: float) -> None:
+def process_file(
+    connection,
+    context,
+    page,
+    path: Path,
+    archive_dir: Path,
+    scan_timeout: float,
+    emit=None,
+) -> str:
     file_hash = fingerprint(path)
     row = connection.execute(
         "SELECT scan_file_id, status FROM uploads WHERE fingerprint = ?", (file_hash,)
@@ -225,36 +276,40 @@ def process_file(connection, context, page, path: Path, archive_dir: Path, scan_
 
     if row and row[1] == "queued":
         archived = archive_file(path, archive_dir)
-        print(f"قبلاً ارسال شده؛ بایگانی شد: {archived.name}")
-        return
+        _report(emit, "success", f"قبلاً ارسال شده؛ بایگانی شد: {archived.name}")
+        return "queued"
     if row and row[1] in {"rejected", "unknown"}:
-        return
+        _report(emit, "warning", f"نتیجه قبلی «{row[1]}» است؛ رد شد: {path.name}")
+        return row[1]
 
     scan_file_id = row[0] if row else None
     if not scan_file_id:
         scan_file_id = upload_file(page, path)
         save_state(connection, file_hash, path, scan_file_id, "uploaded")
-        print(f"آپلود شد و در انتظار اسکن است: {path.name}")
+        _report(emit, "info", f"آپلود شد و در انتظار اسکن است: {path.name}")
 
     result, item = wait_for_scan(context.request, scan_file_id, scan_timeout)
     if result == "clean":
         queue_clean_file(context.request, item)
         save_state(connection, file_hash, path, scan_file_id, "queued")
         archived = archive_file(path, archive_dir)
-        print(f"ارسال و بایگانی شد: {archived.name}")
+        _report(emit, "success", f"ارسال و بایگانی شد: {archived.name}")
     elif result == "queued":
         save_state(connection, file_hash, path, scan_file_id, "queued")
         archived = archive_file(path, archive_dir)
-        print(f"ارسال قبلی تأیید و بایگانی شد: {archived.name}")
+        _report(emit, "success", f"ارسال قبلی تأیید و بایگانی شد: {archived.name}")
     elif result in {"rejected", "unknown"}:
         save_state(connection, file_hash, path, scan_file_id, result)
-        print(f"به‌دلیل نتیجه اسکن «{result}» منتقل نشد: {path.name}")
+        _report(emit, "error", f"به‌دلیل نتیجه اسکن «{result}» منتقل نشد: {path.name}")
     else:
-        print(f"مهلت انتظار اسکن تمام شد؛ در اجرای بعد ادامه می‌یابد: {path.name}")
+        _report(emit, "warning", f"مهلت انتظار اسکن تمام شد؛ در اجرای بعد ادامه می‌یابد: {path.name}")
+    return result
 
 
 def main() -> int:
     args = parse_args()
+    if args.max_files_per_run < 0 or args.max_file_size_mb < 0:
+        raise SystemExit("محدودیت تعداد و حجم نباید منفی باشد.")
     watch_dir = args.watch_dir.resolve()
     watch_dir.mkdir(parents=True, exist_ok=True)
     archive_dir = watch_dir / "_uploaded"
@@ -270,6 +325,7 @@ def main() -> int:
         return 2
 
     observations: dict[Path, tuple[int, int, float]] = {}
+    oversized_reported: dict[Path, tuple[int, int]] = {}
     with sync_playwright() as playwright:
         context, page = launch_persistent_session(
             playwright, app_data / "browser-profile"
@@ -278,10 +334,23 @@ def main() -> int:
         print(f"پایش پوشه آغاز شد: {watch_dir}")
 
         try:
+            cycle_started = time.monotonic()
             while True:
-                for path in find_ready_files(
-                    watch_dir, observations, args.stable_seconds
-                ):
+                ready = find_ready_files(watch_dir, observations, args.stable_seconds)
+                selected, oversized = select_files_for_run(
+                    ready,
+                    args.max_files_per_run,
+                    int(args.max_file_size_mb * 1024 * 1024),
+                )
+                for path in oversized:
+                    stat = path.stat()
+                    signature = (stat.st_size, stat.st_mtime_ns)
+                    if oversized_reported.get(path) != signature:
+                        print(f"به‌دلیل عبور از سقف حجم رد شد: {path.name}")
+                        oversized_reported[path] = signature
+                for missing in set(oversized_reported) - set(ready):
+                    oversized_reported.pop(missing, None)
+                for path in selected:
                     try:
                         process_file(
                             connection,
@@ -294,6 +363,8 @@ def main() -> int:
                         observations.pop(path, None)
                     except Exception as error:
                         print(f"خطا برای {path.name}: {error}")
+                if args.run_once and time.monotonic() - cycle_started >= args.stable_seconds:
+                    break
                 time.sleep(args.poll_seconds)
         except KeyboardInterrupt:
             print("پایش متوقف شد.")

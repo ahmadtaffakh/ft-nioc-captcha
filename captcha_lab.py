@@ -24,6 +24,7 @@ from ft_browser import app_data_dir
 from ft_runtime import (
     BrowserSession,
     DEFAULT_CAPTCHA_SELECTOR,
+    RuntimeLog,
     RuntimeResult,
     capture_captcha_bytes,
 )
@@ -147,6 +148,9 @@ class CaptchaLabApp:
         self.reload_delay_seconds = tk.DoubleVar(value=settings.reload_delay_seconds)
         self.epochs = tk.IntVar(value=settings.epochs)
         self.minimum_confidence = tk.DoubleVar(value=settings.minimum_confidence)
+        self.watch_dir = tk.StringVar(value=settings.watch_dir)
+        self.max_files_per_run = tk.IntVar(value=settings.max_files_per_run)
+        self.max_file_size_mb = tk.DoubleVar(value=settings.max_file_size_mb)
         self.username = tk.StringVar(value=stored_username)
         self.password = tk.StringVar(value=stored_password)
         self.remember_credentials = tk.BooleanVar(value=True)
@@ -194,15 +198,18 @@ class CaptchaLabApp:
         self.browser_tab = ttk.Frame(self.notebook, padding=16)
         self.data_tab = ttk.Frame(self.notebook, padding=16)
         self.login_tab = ttk.Frame(self.notebook, padding=16)
+        self.upload_tab = ttk.Frame(self.notebook, padding=16)
         self.output_tab = ttk.Frame(self.notebook, padding=16)
         self.notebook.add(self.browser_tab, text="  اتصال و CAPTCHA  ")
         self.notebook.add(self.data_tab, text="  داده و آموزش  ")
         self.notebook.add(self.login_tab, text="  ورود سامانه  ")
+        self.notebook.add(self.upload_tab, text="  آپلود فایل  ")
         self.notebook.add(self.output_tab, text="  خروجی و گزارش  ")
 
         self._build_browser_tab()
         self._build_data_tab()
         self._build_login_tab()
+        self._build_upload_tab()
         self._build_output_tab()
 
         status_bar = ttk.Frame(container, style="StatusBar.TFrame", padding=(10, 7))
@@ -615,6 +622,103 @@ class CaptchaLabApp:
         add_tooltip(self.output, "متن خروجی قابل انتخاب و کپی است؛ رمز عبور هرگز در این بخش ثبت نمی‌شود.")
         self._log("info", "برنامه آماده است؛ مرورگر در تمام عملیات باز می‌ماند.")
 
+    def _build_upload_tab(self):
+        upload = ttk.LabelFrame(
+            self.upload_tab,
+            text="انتخاب و انتقال فایل‌ها",
+            style="Card.TLabelframe",
+            padding=22,
+        )
+        upload.pack(fill="x")
+        ttk.Label(upload, text="پوشه ورودی", style="Card.TLabel").grid(
+            row=0, column=0, sticky="e", padx=8, pady=10
+        )
+        folder_entry = ttk.Entry(upload, textvariable=self.watch_dir, justify="left")
+        folder_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=8, pady=10)
+        add_tooltip(folder_entry, "فقط فایل‌های ریشه این پوشه بررسی می‌شوند؛ زیرپوشه‌ها نادیده گرفته می‌شوند.")
+        self._button(
+            upload,
+            "انتخاب پوشه",
+            self._choose_upload_folder,
+            "پوشه حاوی فایل‌های آماده ارسال را انتخاب می‌کند.",
+        ).grid(row=0, column=3, padx=6, pady=10, sticky="ew")
+        ttk.Label(upload, text="حداکثر فایل در هر اجرا", style="Card.TLabel").grid(
+            row=1, column=0, sticky="e", padx=8, pady=10
+        )
+        count_input = ttk.Spinbox(
+            upload,
+            from_=0,
+            to=10000,
+            textvariable=self.max_files_per_run,
+            width=12,
+            justify="center",
+        )
+        count_input.grid(row=1, column=1, sticky="w", padx=8, pady=10)
+        add_tooltip(count_input, "صفر یعنی بدون محدودیت تعداد؛ فایل‌ها به ترتیب نام پردازش می‌شوند.")
+        ttk.Label(upload, text="حداکثر حجم هر فایل (MB)", style="Card.TLabel").grid(
+            row=1, column=2, sticky="e", padx=8, pady=10
+        )
+        size_input = ttk.Spinbox(
+            upload,
+            from_=0,
+            to=100000,
+            increment=1,
+            textvariable=self.max_file_size_mb,
+            width=12,
+            justify="center",
+        )
+        size_input.grid(row=1, column=3, sticky="w", padx=8, pady=10)
+        add_tooltip(size_input, "صفر یعنی بدون محدودیت حجم؛ فایل‌های بزرگ‌تر Skip و در خروجی گزارش می‌شوند.")
+        self._button(
+            upload,
+            "آپلود فایل‌های پوشه",
+            self._upload_folder,
+            "فایل‌های مجاز را آپلود، نتیجه اسکن را بررسی و موارد موفق را در _uploaded بایگانی می‌کند.",
+            "Primary.TButton",
+        ).grid(row=2, column=2, columnspan=2, padx=6, pady=18, sticky="ew")
+        ttk.Label(
+            upload,
+            text="فایل‌های موقت نادیده گرفته می‌شوند. فقط نتیجه صریحاً سالم به مرحله نهایی ارسال می‌شود.",
+            style="MutedCard.TLabel",
+            anchor="e",
+        ).grid(row=3, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 2))
+        upload.columnconfigure(1, weight=1)
+        upload.columnconfigure(2, weight=1)
+        upload.columnconfigure(3, weight=1)
+
+    def _choose_upload_folder(self):
+        selected = filedialog.askdirectory(
+            title="پوشه فایل‌های قابل آپلود را انتخاب کنید",
+            initialdir=self.watch_dir.get() or str(self.base_dir),
+        )
+        if selected:
+            self.watch_dir.set(selected)
+            self._save_preferences(announce=False)
+
+    def _upload_folder(self):
+        try:
+            folder = Path(self.watch_dir.get()).expanduser()
+            max_files = self.max_files_per_run.get()
+            max_size = self.max_file_size_mb.get()
+        except tk.TclError:
+            messagebox.showerror("خطا", "محدودیت تعداد و حجم باید عددی باشند.")
+            return
+        if not folder.is_dir():
+            messagebox.showerror("خطا", "ابتدا یک پوشه معتبر انتخاب کنید.")
+            return
+        if max_files < 0 or max_size < 0:
+            messagebox.showerror("خطا", "محدودیت تعداد و حجم نباید منفی باشد.")
+            return
+        self._save_preferences(announce=False)
+        self.notebook.select(self.output_tab)
+        self._submit(
+            "upload_folder",
+            self.browser.upload_folder,
+            folder,
+            max_files,
+            max_size,
+        )
+
     def _log(self, level, message):
         timestamp = time.strftime("%H:%M:%S")
         self.output.configure(state="normal")
@@ -642,6 +746,9 @@ class CaptchaLabApp:
                 reload_delay_seconds=self.reload_delay_seconds.get(),
                 epochs=self.epochs.get(),
                 minimum_confidence=self.minimum_confidence.get(),
+                watch_dir=self.watch_dir.get(),
+                max_files_per_run=self.max_files_per_run.get(),
+                max_file_size_mb=self.max_file_size_mb.get(),
             )
             settings.validate()
         except (tk.TclError, ValueError) as error:
@@ -869,6 +976,9 @@ class CaptchaLabApp:
                 result = self.results.get_nowait()
             except queue.Empty:
                 break
+            if isinstance(result, RuntimeLog):
+                self._log(result.level, result.message)
+                continue
             task_id = result.task_id
             operation = result.operation
             succeeded = result.succeeded
@@ -907,6 +1017,13 @@ class CaptchaLabApp:
                 message = f"تشخیص: {text} — حداقل اطمینان: {confidence:.1%}"
                 self.status.set(message)
                 self._log("success", message)
+            elif operation == "upload_folder":
+                message = (
+                    f"اجرای آپلود تمام شد؛ پردازش: {payload['processed']}، "
+                    f"خطا: {payload['failed']}، عبور از سقف حجم: {payload['oversized']}"
+                )
+                self.status.set(message)
+                self._log("success" if payload["failed"] == 0 else "warning", message)
             elif isinstance(payload, str):
                 self.status.set(payload)
                 self._log("success", payload)
