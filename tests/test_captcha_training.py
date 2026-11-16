@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from captcha_training import (
+    _split_samples_by_image,
     build_model,
     decode_image_data_url,
     import_labeled_batch,
@@ -58,6 +59,44 @@ class DataUrlTest(unittest.TestCase):
 
 
 class DatasetTest(unittest.TestCase):
+    def test_split_keeps_duplicate_images_out_of_opposite_partition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            samples = []
+            for index, (content, label) in enumerate(
+                [
+                    (b"same", "12345"),
+                    (b"same", "12345"),
+                    (b"two", "23456"),
+                    (b"three", "34567"),
+                    (b"four", "45678"),
+                ]
+            ):
+                image_path = root / f"{index}.png"
+                image_path.write_bytes(content)
+                samples.append((image_path, label))
+
+            train, validation = _split_samples_by_image(samples)
+
+            train_contents = {path.read_bytes() for path, _label in train}
+            validation_contents = {path.read_bytes() for path, _label in validation}
+            self.assertTrue(train)
+            self.assertTrue(validation)
+            self.assertTrue(train_contents.isdisjoint(validation_contents))
+
+    def test_split_rejects_conflicting_labels_for_identical_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(b"same")
+            second.write_bytes(b"same")
+
+            with self.assertRaisesRegex(ValueError, "برچسب‌های متفاوت"):
+                _split_samples_by_image(
+                    [(first, "12345"), (second, "54321")]
+                )
+
     def test_saves_image_and_normalized_label(self):
         with tempfile.TemporaryDirectory() as temporary:
             dataset_dir = Path(temporary)

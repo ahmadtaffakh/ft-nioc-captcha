@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import time
 import uuid
 from pathlib import Path
@@ -232,6 +233,36 @@ def validate_dataset(
     return samples, sequence_length
 
 
+def _split_samples_by_image(
+    samples: list[tuple[Path, str]], validation_fraction: float = 0.2
+) -> tuple[list[tuple[Path, str]], list[tuple[Path, str]]]:
+    """Keep byte-identical images together in a deterministic train/validation split."""
+    groups = {}
+    for image_path, label in samples:
+        digest = hashlib.sha256(image_path.read_bytes()).digest()
+        group = groups.setdefault(digest, [])
+        if group and group[0][1] != label:
+            raise ValueError("یک تصویر تکراری با برچسب‌های متفاوت در dataset وجود دارد.")
+        group.append((image_path, label))
+
+    shuffled_groups = list(groups.values())
+    if len(shuffled_groups) < 2:
+        raise ValueError("برای جداسازی Train و Validation حداقل دو تصویر یکتا لازم است.")
+    random.Random(42).shuffle(shuffled_groups)
+
+    validation_target = max(1, round(len(samples) * validation_fraction))
+    validation_samples = []
+    split_index = 0
+    for split_index, group in enumerate(shuffled_groups[:-1], start=1):
+        validation_samples.extend(group)
+        if len(validation_samples) >= validation_target:
+            break
+    train_samples = [
+        sample for group in shuffled_groups[split_index:] for sample in group
+    ]
+    return train_samples, validation_samples
+
+
 def _import_ml_dependencies():
     try:
         import numpy as np
@@ -310,18 +341,22 @@ def train_model(
     if len(samples) < 20:
         raise ValueError("برای آموزش حداقل ۲۰ نمونه برچسب‌خورده لازم است.")
 
-    rng = np.random.default_rng(42)
-    order = rng.permutation(len(samples))
-    images = np.stack(
-        [_load_image(samples[index][0], Image, np) for index in order]
+    train_samples, validation_samples = _split_samples_by_image(samples)
+    x_train = np.stack(
+        [_load_image(image_path, Image, np) for image_path, _label in train_samples]
     )
-    labels = np.asarray(
-        [[int(digit) for digit in samples[index][1]] for index in order],
+    y_train = np.asarray(
+        [[int(digit) for digit in label] for _image_path, label in train_samples],
         dtype="int32",
     )
-    validation_size = max(1, round(len(samples) * 0.2))
-    x_validation, y_validation = images[:validation_size], labels[:validation_size]
-    x_train, y_train = images[validation_size:], labels[validation_size:]
+    x_validation = np.stack(
+        [_load_image(image_path, Image, np) for image_path, _label in validation_samples]
+    )
+    y_validation = np.asarray(
+        [[int(digit) for digit in label] for _image_path, label in validation_samples],
+        dtype="int32",
+    )
+    validation_size = len(validation_samples)
 
     model = build_model(sequence_length)
     callbacks = [
