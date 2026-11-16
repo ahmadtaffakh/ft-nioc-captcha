@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import io
 import json
 import os
@@ -96,12 +97,23 @@ def import_labeled_batch(
     if not labels_path.is_file():
         raise ValueError("فایل labels.csv در پوشه Batch پیدا نشد.")
 
+    dataset_dir = Path(dataset_dir)
+    known_images = {}
+    for existing_filename, existing_label in read_labels(dataset_dir):
+        existing_bytes = (dataset_dir / existing_filename).read_bytes()
+        digest = hashlib.sha256(existing_bytes).digest()
+        previous_label = known_images.setdefault(digest, existing_label)
+        if previous_label != existing_label:
+            raise ValueError("یک تصویر تکراری با برچسب‌های متفاوت در dataset وجود دارد.")
+
     samples = []
+    batch_rows = 0
     with labels_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
         if not reader.fieldnames or not {"filename", "label"}.issubset(reader.fieldnames):
             raise ValueError("فایل Batch باید ستون‌های filename و label داشته باشد.")
         for row_number, row in enumerate(reader, start=2):
+            batch_rows += 1
             filename = (row.get("filename") or "").strip()
             try:
                 label = normalize_digits(row.get("label") or "")
@@ -118,9 +130,19 @@ def import_labeled_batch(
                 raise ValueError(f"مسیر تصویر ردیف {row_number} نامعتبر است.") from error
             if not image_path.is_file():
                 raise ValueError(f"تصویر ردیف {row_number} پیدا نشد: {filename}")
-            samples.append((image_path.read_bytes(), label))
+            image_bytes = image_path.read_bytes()
+            digest = hashlib.sha256(image_bytes).digest()
+            previous_label = known_images.get(digest)
+            if previous_label is not None:
+                if previous_label != label:
+                    raise ValueError(
+                        f"تصویر ردیف {row_number} قبلاً با برچسب دیگری ثبت شده است."
+                    )
+                continue
+            known_images[digest] = label
+            samples.append((image_bytes, label))
 
-    if not samples:
+    if not batch_rows:
         raise ValueError("Batch هیچ نمونه‌ای ندارد.")
     for image_bytes, label in samples:
         save_labeled_sample(dataset_dir, image_bytes, label, expected_length)

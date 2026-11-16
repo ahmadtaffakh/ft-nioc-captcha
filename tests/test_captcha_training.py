@@ -96,6 +96,47 @@ class DatasetTest(unittest.TestCase):
             rows = read_labels(dataset_dir)
             self.assertEqual([label for _, label in rows], ["12345", "67890"])
 
+    def test_import_skips_images_already_in_dataset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            batch_dir = root / "batch"
+            dataset_dir = root / "dataset"
+            save_labeled_sample(dataset_dir, b"same", "12345", expected_length=5)
+            save_unlabeled_batch_sample(batch_dir, b"same", 1)
+            save_unlabeled_batch_sample(batch_dir, b"new", 2)
+            labels_path = batch_dir / "labels.csv"
+            with labels_path.open("w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["filename", "label"])
+                writer.writeheader()
+                writer.writerow({"filename": "images/captcha-000001.png", "label": "12345"})
+                writer.writerow({"filename": "images/captcha-000002.png", "label": "67890"})
+
+            self.assertEqual(import_labeled_batch(batch_dir, dataset_dir, 5), 1)
+            self.assertEqual(
+                [label for _, label in read_labels(dataset_dir)],
+                ["12345", "67890"],
+            )
+
+    def test_import_rejects_duplicate_image_with_different_label(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            batch_dir = root / "batch"
+            dataset_dir = root / "dataset"
+            save_labeled_sample(dataset_dir, b"same", "12345", expected_length=5)
+            save_unlabeled_batch_sample(batch_dir, b"same", 1)
+            labels_path = batch_dir / "labels.csv"
+            with labels_path.open("w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["filename", "label"])
+                writer.writeheader()
+                writer.writerow({"filename": "images/captcha-000001.png", "label": "54321"})
+
+            with self.assertRaisesRegex(ValueError, "قبلاً با برچسب دیگری"):
+                import_labeled_batch(batch_dir, dataset_dir, 5)
+            self.assertEqual(
+                [label for _, label in read_labels(dataset_dir)],
+                ["12345"],
+            )
+
     def test_rejects_incomplete_batch_before_changing_dataset(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
