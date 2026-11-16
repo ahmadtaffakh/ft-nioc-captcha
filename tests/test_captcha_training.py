@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from captcha_training import (
+    build_model,
     decode_image_data_url,
     import_labeled_batch,
     normalize_digits,
@@ -15,6 +16,15 @@ from captcha_training import (
     save_labeled_sample,
     validate_dataset,
 )
+
+
+class ModelArchitectureTest(unittest.TestCase):
+    def test_preserves_horizontal_features_with_compact_dense_head(self):
+        model = build_model(sequence_length=4)
+
+        self.assertEqual(model.output_shape, (None, 4, 10))
+        self.assertEqual(model.get_layer("height_pool").output.shape, (None, 1, 20, 72))
+        self.assertLess(model.count_params(), 150_000)
 
 
 class DigitNormalizationTest(unittest.TestCase):
