@@ -203,6 +203,32 @@ class BatchCaptureTest(unittest.TestCase):
         )
         self.assertIn("ورود دستی", message)
 
+    def test_automatic_login_uses_configured_attempt_limit(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        session.page = Mock()
+        session.page.url = "https://ft.nioc.ir/dargah/user/sign-in"
+        session.page.wait_for_url.side_effect = RuntimeError("wrong captcha")
+        try:
+            with (
+                patch("ft_runtime.load_model", return_value=object()),
+                patch("ft_runtime.capture_captcha_bytes", return_value=b"captcha"),
+                patch("ft_runtime.predict_image", return_value=("1234", 0.9)) as predict,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "پس از 5 تلاش"):
+                    session.login(
+                        "username",
+                        "password",
+                        "img.captcha",
+                        Path("model"),
+                        0.3,
+                        5,
+                    )
+        finally:
+            session.executor.shutdown(wait=False, cancel_futures=True)
+
+        self.assertEqual(predict.call_count, 5)
+        self.assertEqual(session.page.goto.call_count, 4)
+
     def test_empty_upload_folder_finishes_without_database_work(self):
         with tempfile.TemporaryDirectory() as temporary:
             session = BrowserSession(Path(temporary) / "profile", queue.Queue())
@@ -380,9 +406,38 @@ class OrganizationalUiTest(unittest.TestCase):
                 "داده و آموزش",
                 "ورود سامانه",
                 "آپلود فایل",
+                "دانلود فایل",
                 "خروجی و گزارش",
             ],
         )
+
+    def test_status_bar_distinguishes_running_from_last_status(self):
+        self.assertEqual(self.app.activity_status.get(), "آماده")
+        self.assertEqual(self.app.status.get(), "آماده")
+
+        self.app._mark_task_started("test-task")
+        self.assertEqual(self.app.activity_status.get(), "در حال اجرا")
+
+        self.app.active_tasks.clear()
+        self.app._sync_activity_status()
+        self.assertEqual(self.app.activity_status.get(), "آماده")
+
+    def test_login_and_training_actions_are_grouped_in_single_rows(self):
+        expected_counts = {
+            self.app.data_actions: 3,
+            self.app.training_actions: 2,
+            self.app.login_actions: 2,
+            self.app.login_settings_actions: 2,
+        }
+        for frame, expected_count in expected_counts.items():
+            with self.subTest(frame=str(frame)):
+                buttons = [
+                    child
+                    for child in frame.winfo_children()
+                    if isinstance(child, ttk.Button)
+                ]
+                self.assertEqual(len(buttons), expected_count)
+                self.assertEqual({button.grid_info()["row"] for button in buttons}, {0})
 
     def test_every_action_button_has_a_tooltip(self):
         def descendants(widget):

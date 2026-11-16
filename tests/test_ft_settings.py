@@ -23,6 +23,8 @@ class SettingsTest(unittest.TestCase):
 
         self.assertEqual(settings.reload_delay_seconds, 1.0)
         self.assertEqual(settings.batch_count, 1000)
+        self.assertEqual(settings.minimum_confidence, 0.30)
+        self.assertEqual(settings.login_attempts, 5)
         self.assertTrue(settings.auto_upload_enabled)
 
     def test_settings_round_trip_and_ignore_future_fields(self):
@@ -35,6 +37,7 @@ class SettingsTest(unittest.TestCase):
                 reload_delay_seconds=2.5,
                 epochs=12,
                 minimum_confidence=0.8,
+                login_attempts=7,
             )
             path = save_settings(base_dir, expected)
             payload = json.loads(path.read_text(encoding="utf-8"))

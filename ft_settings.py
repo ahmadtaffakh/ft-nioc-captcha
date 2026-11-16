@@ -11,7 +11,7 @@ from pathlib import Path
 from ctypes import wintypes
 
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 SETTINGS_FILENAME = "settings.json"
 CREDENTIALS_FILENAME = "credentials.dat"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
@@ -24,7 +24,8 @@ class AppSettings:
     batch_count: int = 1000
     reload_delay_seconds: float = 1.0
     epochs: int = 40
-    minimum_confidence: float = 0.75
+    minimum_confidence: float = 0.30
+    login_attempts: int = 5
     watch_dir: str = ""
     max_files_per_run: int = 10
     max_file_size_mb: float = 100.0
@@ -43,6 +44,8 @@ class AppSettings:
             raise ValueError("Epoch باید بین ۱ و ۵۰۰ باشد.")
         if not 0 <= self.minimum_confidence <= 1:
             raise ValueError("حداقل اطمینان باید بین صفر و یک باشد.")
+        if not 1 <= self.login_attempts <= 20:
+            raise ValueError("تعداد تلاش ورود باید بین ۱ و ۲۰ باشد.")
         if not 0 <= self.max_files_per_run <= 10000:
             raise ValueError("سقف تعداد فایل باید بین صفر و ۱۰۰۰۰ باشد.")
         if not 0 <= self.max_file_size_mb <= 100000:

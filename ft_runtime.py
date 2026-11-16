@@ -228,14 +228,17 @@ class BrowserSession:
         selector: str,
         model_dir: Path,
         minimum_confidence: float,
+        max_attempts: int,
     ):
         if not username or not password:
             raise ValueError("نام کاربری و رمز عبور را وارد کنید.")
+        if not 1 <= max_attempts <= 20:
+            raise ValueError("تعداد تلاش ورود باید بین ۱ و ۲۰ باشد.")
         if self.page is None:
             self.open()
         model_bundle = load_model(model_dir)
         last_prediction = None
-        for attempt in range(1, 4):
+        for attempt in range(1, max_attempts + 1):
             if "/filemanager/" in self.page.url:
                 return "ورود قبلاً انجام شده است."
             self.page.locator(USERNAME_SELECTOR).fill(username)
@@ -253,9 +256,12 @@ class BrowserSession:
                 self.page.wait_for_url("**/filemanager/**", timeout=10_000)
                 return f"ورود موفق؛ CAPTCHA: {last_prediction}"
             except Exception:
-                if attempt < 3:
+                if attempt < max_attempts:
                     self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        raise RuntimeError(f"ورود پس از ۳ تلاش موفق نشد؛ آخرین تشخیص: {last_prediction}")
+        raise RuntimeError(
+            f"ورود پس از {max_attempts} تلاش موفق نشد؛ "
+            f"آخرین تشخیص: {last_prediction}"
+        )
 
     def upload_folder(
         self,

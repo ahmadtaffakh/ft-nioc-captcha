@@ -128,6 +128,7 @@ class CaptchaLabApp:
         self.model_dir = self.base_dir / "captcha-model"
         self.results = queue.Queue()
         self.callbacks = {}
+        self.active_tasks = set()
         self.browser = BrowserSession(self.base_dir / "browser-profile", self.results)
         self.current_image = None
         self.preview_reference = None
@@ -161,6 +162,7 @@ class CaptchaLabApp:
         self.reload_delay_seconds = tk.DoubleVar(value=settings.reload_delay_seconds)
         self.epochs = tk.IntVar(value=settings.epochs)
         self.minimum_confidence = tk.DoubleVar(value=settings.minimum_confidence)
+        self.login_attempts = tk.IntVar(value=settings.login_attempts)
         self.watch_dir = tk.StringVar(value=settings.watch_dir)
         self.max_files_per_run = tk.IntVar(value=settings.max_files_per_run)
         self.max_file_size_mb = tk.DoubleVar(value=settings.max_file_size_mb)
@@ -174,6 +176,7 @@ class CaptchaLabApp:
         self.password = tk.StringVar(value=stored_password)
         self.remember_credentials = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="آماده")
+        self.activity_status = tk.StringVar(value="آماده")
         self.sample_count = tk.StringVar()
 
         self._build_ui()
@@ -236,8 +239,25 @@ class CaptchaLabApp:
         self._build_output_tab()
 
         status_bar = ttk.Frame(container, style="StatusBar.TFrame", padding=(10, 7))
-        status_bar.pack(fill="x", pady=(10, 0))
-        ttk.Label(status_bar, text="وضعیت:", style="StatusTitle.TLabel").pack(side="right")
+        status_bar.pack(side="bottom", fill="x", pady=(10, 0))
+        ttk.Label(
+            status_bar, text="وضعیت اجرا:", style="StatusTitle.TLabel"
+        ).pack(side="right")
+        ttk.Label(
+            status_bar,
+            textvariable=self.activity_status,
+            style="Activity.TLabel",
+        ).pack(side="right", padx=(8, 4))
+        self.status_progress = ttk.Progressbar(
+            status_bar, mode="indeterminate", length=80
+        )
+        self.status_progress.pack(side="right", padx=(4, 14))
+        ttk.Separator(status_bar, orient="vertical").pack(
+            side="right", fill="y", padx=8
+        )
+        ttk.Label(
+            status_bar, text="آخرین وضعیت:", style="StatusTitle.TLabel"
+        ).pack(side="right")
         ttk.Label(
             status_bar,
             textvariable=self.status,
@@ -246,7 +266,7 @@ class CaptchaLabApp:
         ).pack(side="right", padx=8)
         ttk.Label(
             status_bar,
-            text="FT Desktop Console",
+            text=f"FT Desktop Console — {APP_VERSION}",
             style="StatusMuted.TLabel",
         ).pack(side="left")
 
@@ -257,6 +277,7 @@ class CaptchaLabApp:
             style.theme_use("clam")
         style.configure(".", font=("Tahoma", 10), foreground=COLORS["text"])
         style.configure("TFrame", background=COLORS["background"])
+        style.configure("Card.TFrame", background=COLORS["surface"])
         style.configure("TLabel", background=COLORS["background"], foreground=COLORS["text"])
         style.configure("Header.TFrame", background=COLORS["navy"])
         style.configure(
@@ -348,6 +369,12 @@ class CaptchaLabApp:
             font=("Tahoma", 9, "bold"),
         )
         style.configure("Status.TLabel", background="#E8EEF5", foreground=COLORS["text"])
+        style.configure(
+            "Activity.TLabel",
+            background="#E8EEF5",
+            foreground=COLORS["primary"],
+            font=("Tahoma", 9, "bold"),
+        )
         style.configure(
             "StatusMuted.TLabel", background="#E8EEF5", foreground=COLORS["muted"]
         )
@@ -472,28 +499,34 @@ class CaptchaLabApp:
         )
         length_input.grid(row=1, column=3, padx=8)
         add_tooltip(length_input, "طول دقیق رشته CAPTCHA در Dataset و مدل.")
+        ttk.Label(labeling, textvariable=self.sample_count, style="Card.TLabel").grid(
+            row=2, column=0, columnspan=4, sticky="e", padx=8, pady=(8, 2)
+        )
+        self.data_actions = ttk.Frame(labeling, style="Card.TFrame")
+        self.data_actions.grid(
+            row=3, column=0, columnspan=4, sticky="ew", pady=(8, 2)
+        )
         self._button(
-            labeling,
+            self.data_actions,
             "ذخیره نمونه و برچسب",
             self._save_sample,
             "تصویر فعلی و برچسب معتبر را به Dataset اضافه می‌کند.",
             "Primary.TButton",
-        ).grid(row=2, column=1, padx=6, pady=14, sticky="ew")
-        ttk.Label(labeling, textvariable=self.sample_count, style="Card.TLabel").grid(
-            row=2, column=2, columnspan=2, sticky="e", padx=8
-        )
+        ).grid(row=0, column=0, padx=5, sticky="ew")
         self._button(
-            labeling,
+            self.data_actions,
             "ورود Batch برچسب‌خورده",
             self._import_batch,
             "پوشه Batch تکمیل‌شده در Excel را اعتبارسنجی و وارد Dataset می‌کند.",
-        ).grid(row=3, column=1, columnspan=2, pady=(4, 8), sticky="ew")
+        ).grid(row=0, column=1, padx=5, sticky="ew")
         self._button(
-            labeling,
+            self.data_actions,
             "تست مدل روی Batch",
             self._predict_batch,
             "پیش‌بینی مدل را در ستون سوم labels.csv می‌نویسد و نرخ تطبیق را گزارش می‌کند.",
-        ).grid(row=3, column=3, padx=(6, 0), pady=(4, 8), sticky="ew")
+        ).grid(row=0, column=2, padx=5, sticky="ew")
+        for column in range(3):
+            self.data_actions.columnconfigure(column, weight=1, uniform="data_actions")
         labeling.columnconfigure(1, weight=1)
         labeling.columnconfigure(3, weight=1)
 
@@ -512,21 +545,28 @@ class CaptchaLabApp:
         )
         epochs_input.grid(row=0, column=1, padx=8, pady=8)
         add_tooltip(epochs_input, "حداکثر دفعات آموزش؛ Early Stopping ممکن است زودتر آموزش را متوقف کند.")
+        self.training_actions = ttk.Frame(training, style="Card.TFrame")
+        self.training_actions.grid(
+            row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0)
+        )
         self._button(
-            training,
+            self.training_actions,
             "آموزش مدل",
             self._train,
             "مدل را با Dataset فعلی آموزش می‌دهد و دقت اعتبارسنجی را گزارش می‌کند.",
             "Primary.TButton",
-        ).grid(row=0, column=2, padx=6, sticky="ew")
+        ).grid(row=0, column=0, padx=5, sticky="ew")
         self._button(
-            training,
+            self.training_actions,
             "آزمون تصویر فعلی",
             self._predict_current,
             "مدل ذخیره‌شده را روی CAPTCHA فعلی اجرا می‌کند.",
-        ).grid(row=0, column=3, padx=6, sticky="ew")
-        training.columnconfigure(2, weight=1)
-        training.columnconfigure(3, weight=1)
+        ).grid(row=0, column=1, padx=5, sticky="ew")
+        for column in range(2):
+            self.training_actions.columnconfigure(
+                column, weight=1, uniform="training_actions"
+            )
+        training.columnconfigure(1, weight=1)
 
     def _build_login_tab(self):
         login = ttk.LabelFrame(
@@ -540,10 +580,12 @@ class CaptchaLabApp:
             row=0, column=0, sticky="e", padx=8, pady=8
         )
         username_entry = ttk.Entry(login, textvariable=self.username, width=32, justify="left")
-        username_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=8)
+        username_entry.grid(
+            row=0, column=1, columnspan=3, sticky="ew", padx=8, pady=8
+        )
         add_tooltip(username_entry, "نام کاربری سامانه؛ پس از ورود خودکار موفق می‌تواند امن ذخیره شود.")
         ttk.Label(login, text="حداقل اطمینان مدل", style="Card.TLabel").grid(
-            row=0, column=2, sticky="e", padx=8, pady=8
+            row=2, column=0, sticky="e", padx=8, pady=8
         )
         confidence_input = ttk.Spinbox(
             login,
@@ -554,7 +596,7 @@ class CaptchaLabApp:
             width=10,
             justify="center",
         )
-        confidence_input.grid(row=0, column=3, padx=8, pady=8)
+        confidence_input.grid(row=2, column=1, sticky="w", padx=8, pady=8)
         add_tooltip(confidence_input, "اگر اطمینان مدل کمتر از این مقدار باشد CAPTCHA Reload می‌شود.")
         ttk.Label(login, text="رمز عبور", style="Card.TLabel").grid(
             row=1, column=0, sticky="e", padx=8, pady=8
@@ -562,47 +604,81 @@ class CaptchaLabApp:
         password_entry = ttk.Entry(
             login, textvariable=self.password, show="●", width=32, justify="left"
         )
-        password_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=8)
+        password_entry.grid(
+            row=1, column=1, columnspan=3, sticky="ew", padx=8, pady=8
+        )
         add_tooltip(password_entry, "رمز در Log نمایش داده نمی‌شود و با Windows DPAPI محافظت می‌شود.")
-        self._button(
+        ttk.Label(login, text="حداکثر تلاش ورود", style="Card.TLabel").grid(
+            row=2, column=2, sticky="e", padx=8, pady=8
+        )
+        attempts_input = ttk.Spinbox(
             login,
-            "ورود دستی",
-            self._manual_login,
-            "صفحه ورود را باز می‌کند تا اطلاعات و CAPTCHA را شخصاً وارد کنید.",
-        ).grid(row=1, column=2, padx=6, pady=8, sticky="ew")
-        self._button(
-            login,
-            "آزمون ورود خودکار",
-            self._login,
-            "مدل CAPTCHA را اجرا می‌کند و حداکثر سه بار برای ورود تلاش می‌کند.",
-            "Primary.TButton",
-        ).grid(row=1, column=3, padx=6, pady=8, sticky="ew")
+            from_=1,
+            to=20,
+            textvariable=self.login_attempts,
+            width=10,
+            justify="center",
+        )
+        attempts_input.grid(row=2, column=3, sticky="w", padx=8, pady=8)
+        add_tooltip(
+            attempts_input,
+            "حداکثر دفعات دریافت، تشخیص و ارسال CAPTCHA در ورود خودکار.",
+        )
         remember = ttk.Checkbutton(
             login,
             text="ذخیره امن پس از ورود موفق",
             variable=self.remember_credentials,
         )
-        remember.grid(row=2, column=0, columnspan=2, sticky="e", padx=8, pady=12)
+        remember.grid(row=3, column=0, columnspan=4, sticky="e", padx=8, pady=8)
         add_tooltip(remember, "Credential فقط پس از تأیید ورود خودکار و برای همین حساب Windows ذخیره می‌شود.")
+        self.login_actions = ttk.Frame(login, style="Card.TFrame")
+        self.login_actions.grid(
+            row=4, column=0, columnspan=4, sticky="ew", pady=(10, 4)
+        )
         self._button(
-            login,
+            self.login_actions,
+            "ورود دستی",
+            self._manual_login,
+            "صفحه ورود را باز می‌کند تا اطلاعات و CAPTCHA را شخصاً وارد کنید.",
+        ).grid(row=0, column=0, padx=5, sticky="ew")
+        self._button(
+            self.login_actions,
+            "آزمون ورود خودکار",
+            self._login,
+            "مدل CAPTCHA را اجرا می‌کند و تا سقف تنظیم‌شده برای ورود تلاش می‌کند.",
+            "Primary.TButton",
+        ).grid(row=0, column=1, padx=5, sticky="ew")
+        for column in range(2):
+            self.login_actions.columnconfigure(
+                column, weight=1, uniform="login_actions"
+            )
+        self.login_settings_actions = ttk.Frame(login, style="Card.TFrame")
+        self.login_settings_actions.grid(
+            row=5, column=0, columnspan=4, sticky="ew", pady=(4, 8)
+        )
+        self._button(
+            self.login_settings_actions,
             "ذخیره تنظیمات",
             self._save_preferences,
             "تنظیمات غیرحساس رابط را در پروفایل کاربر ذخیره می‌کند.",
-        ).grid(row=2, column=2, padx=6, pady=8, sticky="ew")
+        ).grid(row=0, column=0, padx=5, sticky="ew")
         self._button(
-            login,
+            self.login_settings_actions,
             "پاک کردن اطلاعات ورود",
             self._forget_credentials,
             "Credential رمزگذاری‌شده را حذف و فیلدهای ورود را خالی می‌کند.",
             "Danger.TButton",
-        ).grid(row=2, column=3, padx=6, pady=8, sticky="ew")
+        ).grid(row=0, column=1, padx=5, sticky="ew")
+        for column in range(2):
+            self.login_settings_actions.columnconfigure(
+                column, weight=1, uniform="login_settings_actions"
+            )
         ttk.Label(
             login,
             text="اطلاعات ورود با Windows DPAPI محافظت می‌شوند و در خروجی برنامه نوشته نمی‌شوند.",
             style="MutedCard.TLabel",
             anchor="e",
-        ).grid(row=3, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 2))
+        ).grid(row=6, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 2))
         login.columnconfigure(1, weight=1)
         login.columnconfigure(2, weight=1)
         login.columnconfigure(3, weight=1)
@@ -1024,6 +1100,7 @@ class CaptchaLabApp:
                 reload_delay_seconds=self.reload_delay_seconds.get(),
                 epochs=self.epochs.get(),
                 minimum_confidence=self.minimum_confidence.get(),
+                login_attempts=self.login_attempts.get(),
                 watch_dir=self.watch_dir.get(),
                 max_files_per_run=self.max_files_per_run.get(),
                 max_file_size_mb=self.max_file_size_mb.get(),
@@ -1069,11 +1146,30 @@ class CaptchaLabApp:
 
     def _submit(self, operation_name, operation, *args, success=None, announce=True):
         if announce:
-            self.status.set("در حال انجام...")
+            self.status.set("عملیات در حال اجرا است...")
             self._log("info", f"شروع عملیات: {operation_name}")
         task_id = self.browser.submit(operation_name, operation, *args)
         self.callbacks[task_id] = success
+        self._mark_task_started(task_id)
         return task_id
+
+    def _mark_task_started(self, task_id):
+        if not hasattr(self, "active_tasks"):
+            self.active_tasks = set()
+        self.active_tasks.add(task_id)
+        self._sync_activity_status()
+
+    def _sync_activity_status(self):
+        if not hasattr(self, "activity_status"):
+            return
+        busy = bool(getattr(self, "active_tasks", ()))
+        self.activity_status.set("در حال اجرا" if busy else "آماده")
+        if not hasattr(self, "status_progress"):
+            return
+        if busy:
+            self.status_progress.start(12)
+        else:
+            self.status_progress.stop()
 
     def _open_browser(self):
         self._submit("open", self.browser.open)
@@ -1175,6 +1271,7 @@ class CaptchaLabApp:
                 )
 
         self.status.set("در حال ورود Batch...")
+        self._mark_task_started("import_batch")
         threading.Thread(target=work, daemon=True).start()
 
     def _train(self):
@@ -1190,6 +1287,7 @@ class CaptchaLabApp:
             messagebox.showerror("خطا", "تعداد ارقام و Epoch باید عدد صحیح باشند.")
             return
         self.status.set("مدل در حال آموزش است...")
+        self._mark_task_started("train")
 
         def work():
             try:
@@ -1219,6 +1317,7 @@ class CaptchaLabApp:
                 self.results.put(RuntimeResult("predict", "predict", False, str(error)))
 
         self.status.set("در حال پیش‌بینی...")
+        self._mark_task_started("predict")
         threading.Thread(target=work, daemon=True).start()
 
     def _predict_batch(self):
@@ -1241,16 +1340,21 @@ class CaptchaLabApp:
                 )
 
         self.status.set("در حال تست مدل روی Batch...")
+        self._mark_task_started("predict_batch")
         threading.Thread(target=work, daemon=True).start()
 
     def _login(self):
         try:
             minimum_confidence = self.minimum_confidence.get()
+            login_attempts = self.login_attempts.get()
         except tk.TclError:
-            messagebox.showerror("خطا", "حداقل اطمینان باید عددی بین صفر و یک باشد.")
+            messagebox.showerror("خطا", "اطمینان و تعداد تلاش ورود باید عددی باشند.")
             return
         if not 0 <= minimum_confidence <= 1:
             messagebox.showerror("خطا", "حداقل اطمینان باید بین صفر و یک باشد.")
+            return
+        if not 1 <= login_attempts <= 20:
+            messagebox.showerror("خطا", "تعداد تلاش ورود باید بین ۱ و ۲۰ باشد.")
             return
         self._save_preferences(announce=False)
         self._submit(
@@ -1261,6 +1365,7 @@ class CaptchaLabApp:
             self.selector.get(),
             self.model_dir,
             minimum_confidence,
+            login_attempts,
             success=self._after_login,
         )
 
@@ -1289,6 +1394,9 @@ class CaptchaLabApp:
             succeeded = result.succeeded
             payload = result.payload
             callback = self.callbacks.pop(task_id, None)
+            if hasattr(self, "active_tasks"):
+                self.active_tasks.discard(task_id)
+                self._sync_activity_status()
             if task_id == self.upload_task_id:
                 self.upload_task_id = None
             if task_id == self.download_task_id:
