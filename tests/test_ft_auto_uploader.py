@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, call, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 from ft_auto_uploader import (
     _build_api_console_script,
@@ -14,6 +14,7 @@ from ft_auto_uploader import (
     parse_args,
     scan_result,
     select_files_for_run,
+    upload_file,
     wait_for_file_manager,
 )
 
@@ -144,6 +145,42 @@ class ScanResultTest(unittest.TestCase):
         self.assertEqual(scan_result(clean), "clean")
         self.assertEqual(scan_result(unknown), "unknown")
         self.assertEqual(scan_result(infected), "rejected")
+
+
+class UploadInteractionTest(unittest.TestCase):
+    def test_file_chooser_and_visible_confirmation_are_handled(self):
+        page = Mock()
+        upload_button = Mock()
+        confirmation_button = Mock()
+        page.locator.side_effect = [upload_button, confirmation_button]
+
+        chooser_context = MagicMock()
+        chooser_event = Mock()
+        chooser = Mock()
+        chooser_event.value = chooser
+        chooser_context.__enter__.return_value = chooser_event
+        page.expect_file_chooser.return_value = chooser_context
+
+        response_context = MagicMock()
+        response_event = Mock()
+        response = Mock(ok=True)
+        response.request.url = "https://ft.nioc.ir/sarp-api/api/Scan/UploadFile"
+        response.json.return_value = {"scanFileId": "scan-1"}
+        response_event.value = response
+        response_context.__enter__.return_value = response_event
+        page.expect_response.return_value = response_context
+
+        with (
+            patch("ft_auto_uploader._multipart_file_field", return_value="file"),
+            patch("ft_auto_uploader._write_network_debug"),
+        ):
+            result = upload_file(page, Path("document.pdf"))
+
+        page.expect_file_chooser.assert_called_once_with(timeout=10_000)
+        upload_button.first.click.assert_called_once_with()
+        chooser.set_files.assert_called_once_with("document.pdf")
+        confirmation_button.last.click.assert_called_once_with()
+        self.assertEqual(result, "scan-1")
 
 
 class FileManagerLoginTest(unittest.TestCase):

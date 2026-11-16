@@ -320,17 +320,16 @@ def wait_for_file_manager(page, login_timeout_ms: int, login_handler=None) -> No
 
 
 def upload_file(page, path: Path) -> str:
-    page.locator("button.mr-5").first.click()
-    file_input = page.locator("#main-page-blank > input")
-    file_input.wait_for(state="attached", timeout=10_000)
-    file_input.set_input_files(str(path))
+    with page.expect_file_chooser(timeout=10_000) as file_chooser_info:
+        page.locator("button.mr-5").first.click()
+    file_chooser_info.value.set_files(str(path))
 
     with page.expect_response(
         lambda response: response.url.endswith(UPLOAD_RESPONSE_SUFFIX)
         and response.request.method == "POST",
         timeout=120_000,
     ) as response_info:
-        page.locator("div.v-card__actions button").nth(1).click()
+        page.locator("div.v-card__actions button:visible").last.click()
 
     response = response_info.value
     request = response.request
