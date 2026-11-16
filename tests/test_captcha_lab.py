@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from captcha_lab import AUTO_UPLOAD_INTERVAL_MS, CaptchaLabApp
+from ft_auto_uploader import open_state, process_file
 from ft_runtime import BrowserSession, capture_captcha_bytes
 
 
@@ -212,7 +213,7 @@ class BatchCaptureTest(unittest.TestCase):
                         patch("ft_runtime.wait_for_file_manager"),
                         patch("ft_runtime.process_file", side_effect=side_effects) as process,
                     ):
-                        result = session.upload_folder(folder, 0, 0)
+                        result = session.upload_folder(folder, 0, 0, "thinclient")
                 finally:
                     session.executor.shutdown(wait=False, cancel_futures=True)
 
@@ -222,6 +223,84 @@ class BatchCaptureTest(unittest.TestCase):
                 self.assertEqual(
                     any("دو ردیف پیاپی" in message for message in messages), should_stop
                 )
+
+    def test_downloads_only_opposite_origin_and_blocks_reverse_upload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            session = BrowserSession(base / "browser-profile", queue.Queue())
+            session.page = Mock()
+            session.context = Mock()
+            groups = Mock(ok=True, status=200)
+            groups.json.return_value = {
+                "isSuccess": True,
+                "data": [{"id": "group-1", "isDefault": True, "isDisabled": False}],
+            }
+            listing = Mock(ok=True, status=200)
+            listing.json.return_value = {
+                "isSuccess": True,
+                "data": {
+                    "totalCount": 3,
+                    "items": [
+                        {
+                            "id": "remote-1",
+                            "groupId": "group-1",
+                            "name": "__FT_TC__report",
+                            "extension": ".pdf",
+                            "size": 7,
+                            "directory": False,
+                        },
+                        {
+                            "id": "remote-2",
+                            "groupId": "group-1",
+                            "name": "__FT_IN__local",
+                            "extension": ".pdf",
+                            "size": 7,
+                            "directory": False,
+                        },
+                        {
+                            "id": "remote-3",
+                            "groupId": "group-1",
+                            "name": "untagged",
+                            "extension": ".pdf",
+                            "size": 7,
+                            "directory": False,
+                        },
+                    ],
+                },
+            }
+            download = Mock(ok=True, status=200)
+            download.body.return_value = b"payload"
+            session.context.request.get.side_effect = [groups, download]
+            session.context.request.put.return_value = listing
+            destination = base / "downloads"
+            upload_dir = base / "uploads"
+            upload_dir.mkdir()
+            try:
+                with patch.object(session, "_ensure_file_manager"):
+                    records = session.list_downloadable_files("intranet")
+                    result = session.download_files(
+                        records, destination, "intranet", upload_dir
+                    )
+                connection = open_state(base / "state.db")
+                try:
+                    with patch("ft_auto_uploader._write_network_debug"):
+                        reverse = process_file(
+                            connection,
+                            Mock(),
+                            Mock(),
+                            destination / "report.pdf",
+                            upload_dir / "_uploaded",
+                            1,
+                            environment="intranet",
+                        )
+                finally:
+                    connection.close()
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
+        self.assertEqual([record["name"] for record in records], ["report.pdf"])
+        self.assertEqual(result, {"downloaded": 1, "skipped": 0, "failed": 0})
+        self.assertEqual(reverse, "downloaded")
 
 
 class CredentialPersistenceTest(unittest.TestCase):

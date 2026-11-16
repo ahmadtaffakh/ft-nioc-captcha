@@ -11,7 +11,7 @@ from pathlib import Path
 from ctypes import wintypes
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 SETTINGS_FILENAME = "settings.json"
 CREDENTIALS_FILENAME = "credentials.dat"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
@@ -29,6 +29,8 @@ class AppSettings:
     max_files_per_run: int = 10
     max_file_size_mb: float = 100.0
     auto_upload_enabled: bool = True
+    environment: str = ""
+    download_dir: str = ""
 
     def validate(self) -> None:
         if not 1 <= self.sequence_length <= 10:
@@ -47,6 +49,8 @@ class AppSettings:
             raise ValueError("سقف حجم فایل باید بین صفر و ۱۰۰۰۰۰ مگابایت باشد.")
         if not isinstance(self.auto_upload_enabled, bool):
             raise ValueError("وضعیت آپلود خودکار معتبر نیست.")
+        if self.environment not in {"", "thinclient", "intranet"}:
+            raise ValueError("محیط اجرا معتبر نیست.")
 
 
 class _DataBlob(ctypes.Structure):

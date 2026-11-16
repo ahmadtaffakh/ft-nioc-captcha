@@ -14,10 +14,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from ft_browser import app_data_dir, launch_persistent_session
@@ -32,6 +35,69 @@ QUEUE_URL = BASE_URL + "sarp-api/api/Scan/QueueForUploadFileFromQuarantineToSama
 UPLOAD_RESPONSE_SUFFIX = "/sarp-api/api/Scan/UploadFile"
 TEMP_SUFFIXES = {".crdownload", ".part", ".tmp"}
 NETWORK_DEBUG_NAME = "last-upload-network.console.txt"
+TRANSFER_PREFIXES = {
+    "thinclient": "__FT_TC__",
+    "intranet": "__FT_IN__",
+}
+
+
+def validate_environment(environment: str) -> str:
+    if environment not in TRANSFER_PREFIXES:
+        raise ValueError("محیط اجرا باید صریحاً «تین‌کلاینت» یا «اینترانت» باشد.")
+    return environment
+
+
+def opposite_environment(environment: str) -> str:
+    validate_environment(environment)
+    return "intranet" if environment == "thinclient" else "thinclient"
+
+
+def tagged_transfer_name(name: str, environment: str) -> str:
+    validate_environment(environment)
+    if Path(name).name != name or not name:
+        raise ValueError("نام فایل برای انتقال معتبر نیست.")
+    if any(name.startswith(prefix) for prefix in TRANSFER_PREFIXES.values()):
+        raise ValueError("نام فایل از نشان رزروشده انتقال استفاده می‌کند.")
+    return TRANSFER_PREFIXES[environment] + name
+
+
+def parse_transfer_name(name: str) -> tuple[str, str] | None:
+    if Path(name).name != name:
+        return None
+    for environment, prefix in TRANSFER_PREFIXES.items():
+        if name.startswith(prefix):
+            original = name[len(prefix) :]
+            if (
+                original
+                and original not in {".", ".."}
+                and Path(original).name == original
+                and not any(
+                    original.startswith(other) for other in TRANSFER_PREFIXES.values()
+                )
+            ):
+                return environment, original
+            return None
+    return None
+
+
+@contextmanager
+def staged_transfer_path(path: Path, environment: str):
+    path = Path(path)
+    tagged_name = tagged_transfer_name(path.name, environment)
+    staging_dir = Path(tempfile.mkdtemp(prefix=".ft-transfer-", dir=path.parent))
+    staged = staging_dir / tagged_name
+    try:
+        try:
+            os.link(path, staged)
+        except OSError:
+            shutil.copy2(path, staged)
+        yield staged
+    finally:
+        staged.unlink(missing_ok=True)
+        try:
+            staging_dir.rmdir()
+        except OSError:
+            pass
 
 
 def _network_debug_path() -> Path:
@@ -132,6 +198,12 @@ def _multipart_file_field(request) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Upload files placed in a watched folder.")
     parser.add_argument("--watch-dir", required=True, type=Path)
+    parser.add_argument(
+        "--environment",
+        required=True,
+        choices=tuple(TRANSFER_PREFIXES),
+        help="Origin environment used for strict cross-environment transfer rules.",
+    )
     parser.add_argument("--stable-seconds", type=float, default=5.0)
     parser.add_argument("--poll-seconds", type=float, default=3.0)
     parser.add_argument("--scan-timeout-minutes", type=float, default=30.0)
@@ -233,6 +305,17 @@ def open_state(path: Path) -> sqlite3.Connection:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS downloads (
+            remote_id TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL UNIQUE,
+            destination_path TEXT NOT NULL,
+            origin_environment TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
     return connection
 
 
@@ -266,6 +349,54 @@ def list_upload_history(connection: sqlite3.Connection) -> list[tuple[str, str, 
         ORDER BY updated_at DESC, source_path
         """
     ).fetchall()
+
+
+def downloaded_fingerprint_exists(connection: sqlite3.Connection, file_hash: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM downloads WHERE fingerprint = ?", (file_hash,)
+        ).fetchone()
+        is not None
+    )
+
+
+def downloaded_remote_id_exists(connection: sqlite3.Connection, remote_id: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM downloads WHERE remote_id = ?", (remote_id,)
+        ).fetchone()
+        is not None
+    )
+
+
+def save_download_state(
+    connection: sqlite3.Connection,
+    remote_id: str,
+    file_hash: str,
+    destination_path: Path,
+    origin_environment: str,
+) -> None:
+    validate_environment(origin_environment)
+    connection.execute(
+        """
+        INSERT INTO downloads (
+            remote_id, fingerprint, destination_path, origin_environment, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(remote_id) DO UPDATE SET
+            fingerprint=excluded.fingerprint,
+            destination_path=excluded.destination_path,
+            origin_environment=excluded.origin_environment,
+            updated_at=excluded.updated_at
+        """,
+        (
+            remote_id,
+            file_hash,
+            str(destination_path),
+            origin_environment,
+            int(time.time()),
+        ),
+    )
+    connection.commit()
 
 
 def scan_result(item: dict) -> str:
@@ -319,17 +450,18 @@ def wait_for_file_manager(page, login_timeout_ms: int, login_handler=None) -> No
         handler(upload_button, login_timeout_ms)
 
 
-def upload_file(page, path: Path) -> str:
-    with page.expect_file_chooser(timeout=10_000) as file_chooser_info:
-        page.locator("button.mr-5").first.click()
-    file_chooser_info.value.set_files(str(path))
+def upload_file(page, path: Path, environment: str) -> str:
+    with staged_transfer_path(path, environment) as staged:
+        with page.expect_file_chooser(timeout=10_000) as file_chooser_info:
+            page.locator("button.mr-5").first.click()
+        file_chooser_info.value.set_files(str(staged))
 
-    with page.expect_response(
-        lambda response: response.url.endswith(UPLOAD_RESPONSE_SUFFIX)
-        and response.request.method == "POST",
-        timeout=120_000,
-    ) as response_info:
-        page.locator("div.v-card__actions button:visible").last.click()
+        with page.expect_response(
+            lambda response: response.url.endswith(UPLOAD_RESPONSE_SUFFIX)
+            and response.request.method == "POST",
+            timeout=120_000,
+        ) as response_info:
+            page.locator("div.v-card__actions button:visible").last.click()
 
     response = response_info.value
     request = response.request
@@ -392,13 +524,22 @@ def process_file(
     archive_dir: Path,
     scan_timeout: float,
     emit=None,
+    environment: str = "",
 ) -> str:
+    validate_environment(environment)
     _write_network_debug(
         "// Network commands for the latest FT upload.\n"
         "// Paste one JavaScript block at a time into the browser DevTools Console.",
         reset=True,
     )
     file_hash = fingerprint(path)
+    if downloaded_fingerprint_exists(connection, file_hash):
+        _report(
+            emit,
+            "warning",
+            f"فایل قبلاً از محیط مقابل دانلود شده و دوباره آپلود نمی‌شود: {path.name}",
+        )
+        return "downloaded"
     row = connection.execute(
         "SELECT scan_file_id, status FROM uploads WHERE fingerprint = ?", (file_hash,)
     ).fetchone()
@@ -413,7 +554,7 @@ def process_file(
 
     scan_file_id = row[0] if row else None
     if not scan_file_id:
-        scan_file_id = upload_file(page, path)
+        scan_file_id = upload_file(page, path, environment)
         save_state(connection, file_hash, path, scan_file_id, "uploaded")
         _report(emit, "info", f"آپلود شد و در انتظار اسکن است: {path.name}")
 
@@ -490,6 +631,7 @@ def main() -> int:
                             path,
                             archive_dir,
                             args.scan_timeout_minutes * 60,
+                            environment=args.environment,
                         )
                         observations.pop(path, None)
                         consecutive_failures = 0

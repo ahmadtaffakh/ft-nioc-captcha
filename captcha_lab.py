@@ -55,6 +55,12 @@ COLORS = {
 }
 
 AUTO_UPLOAD_INTERVAL_MS = 10_000
+ENVIRONMENT_LABELS = {
+    "": "انتخاب نشده",
+    "thinclient": "تین‌کلاینت",
+    "intranet": "اینترانت",
+}
+ENVIRONMENT_CODES = {label: code for code, label in ENVIRONMENT_LABELS.items()}
 
 
 def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
@@ -126,6 +132,7 @@ class CaptchaLabApp:
         self.preview_reference = None
         self.closing = False
         self.upload_task_id = None
+        self.download_task_id = None
         self.auto_upload_suspended = False
         self.auto_upload_warning = None
         self.startup_warnings = []
@@ -157,6 +164,11 @@ class CaptchaLabApp:
         self.max_files_per_run = tk.IntVar(value=settings.max_files_per_run)
         self.max_file_size_mb = tk.DoubleVar(value=settings.max_file_size_mb)
         self.auto_upload_enabled = tk.BooleanVar(value=settings.auto_upload_enabled)
+        self.environment_label = tk.StringVar(
+            value=ENVIRONMENT_LABELS[settings.environment]
+        )
+        self.download_dir = tk.StringVar(value=settings.download_dir)
+        self.remote_downloads = {}
         self.username = tk.StringVar(value=stored_username)
         self.password = tk.StringVar(value=stored_password)
         self.remember_credentials = tk.BooleanVar(value=True)
@@ -206,17 +218,20 @@ class CaptchaLabApp:
         self.data_tab = ttk.Frame(self.notebook, padding=16)
         self.login_tab = ttk.Frame(self.notebook, padding=16)
         self.upload_tab = ttk.Frame(self.notebook, padding=16)
+        self.download_tab = ttk.Frame(self.notebook, padding=16)
         self.output_tab = ttk.Frame(self.notebook, padding=16)
         self.notebook.add(self.browser_tab, text="  اتصال و CAPTCHA  ")
         self.notebook.add(self.data_tab, text="  داده و آموزش  ")
         self.notebook.add(self.login_tab, text="  ورود سامانه  ")
         self.notebook.add(self.upload_tab, text="  آپلود فایل  ")
+        self.notebook.add(self.download_tab, text="  دانلود فایل  ")
         self.notebook.add(self.output_tab, text="  خروجی و گزارش  ")
 
         self._build_browser_tab()
         self._build_data_tab()
         self._build_login_tab()
         self._build_upload_tab()
+        self._build_download_tab()
         self._build_output_tab()
 
         status_bar = ttk.Frame(container, style="StatusBar.TFrame", padding=(10, 7))
@@ -678,20 +693,33 @@ class CaptchaLabApp:
             padding=22,
         )
         upload.pack(fill="x")
-        ttk.Label(upload, text="پوشه ورودی", style="Card.TLabel").grid(
+        ttk.Label(upload, text="محیط اجرا", style="Card.TLabel").grid(
             row=0, column=0, sticky="e", padx=8, pady=10
         )
+        environment = ttk.Combobox(
+            upload,
+            textvariable=self.environment_label,
+            values=list(ENVIRONMENT_LABELS.values()),
+            state="readonly",
+            justify="right",
+        )
+        environment.grid(row=0, column=1, columnspan=3, sticky="ew", padx=8, pady=10)
+        environment.bind("<<ComboboxSelected>>", lambda _event: self._save_preferences(False))
+        add_tooltip(environment, "محیط نامشخص اجازه آپلود یا دانلود نمی‌دهد.")
+        ttk.Label(upload, text="پوشه ورودی", style="Card.TLabel").grid(
+            row=1, column=0, sticky="e", padx=8, pady=10
+        )
         folder_entry = ttk.Entry(upload, textvariable=self.watch_dir, justify="left")
-        folder_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=8, pady=10)
+        folder_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=8, pady=10)
         add_tooltip(folder_entry, "فقط فایل‌های ریشه این پوشه بررسی می‌شوند؛ زیرپوشه‌ها نادیده گرفته می‌شوند.")
         self._button(
             upload,
             "انتخاب پوشه",
             self._choose_upload_folder,
             "پوشه حاوی فایل‌های آماده ارسال را انتخاب می‌کند.",
-        ).grid(row=0, column=3, padx=6, pady=10, sticky="ew")
+        ).grid(row=1, column=3, padx=6, pady=10, sticky="ew")
         ttk.Label(upload, text="حداکثر فایل در هر اجرا", style="Card.TLabel").grid(
-            row=1, column=0, sticky="e", padx=8, pady=10
+            row=2, column=0, sticky="e", padx=8, pady=10
         )
         count_input = ttk.Spinbox(
             upload,
@@ -701,10 +729,10 @@ class CaptchaLabApp:
             width=12,
             justify="center",
         )
-        count_input.grid(row=1, column=1, sticky="w", padx=8, pady=10)
+        count_input.grid(row=2, column=1, sticky="w", padx=8, pady=10)
         add_tooltip(count_input, "صفر یعنی بدون محدودیت تعداد؛ فایل‌ها به ترتیب نام پردازش می‌شوند.")
         ttk.Label(upload, text="حداکثر حجم هر فایل (MB)", style="Card.TLabel").grid(
-            row=1, column=2, sticky="e", padx=8, pady=10
+            row=2, column=2, sticky="e", padx=8, pady=10
         )
         size_input = ttk.Spinbox(
             upload,
@@ -715,7 +743,7 @@ class CaptchaLabApp:
             width=12,
             justify="center",
         )
-        size_input.grid(row=1, column=3, sticky="w", padx=8, pady=10)
+        size_input.grid(row=2, column=3, sticky="w", padx=8, pady=10)
         add_tooltip(size_input, "صفر یعنی بدون محدودیت حجم؛ فایل‌های بزرگ‌تر Skip و در خروجی گزارش می‌شوند.")
         self._button(
             upload,
@@ -723,24 +751,168 @@ class CaptchaLabApp:
             self._upload_folder,
             "فایل‌های مجاز را آپلود، نتیجه اسکن را بررسی و موارد موفق را در _uploaded بایگانی می‌کند.",
             "Primary.TButton",
-        ).grid(row=2, column=2, columnspan=2, padx=6, pady=18, sticky="ew")
+        ).grid(row=3, column=2, columnspan=2, padx=6, pady=18, sticky="ew")
         auto_upload = ttk.Checkbutton(
             upload,
             text="آپلود خودکار هر ۱۰ ثانیه",
             variable=self.auto_upload_enabled,
             command=self._toggle_auto_upload,
         )
-        auto_upload.grid(row=2, column=0, columnspan=2, padx=8, pady=18, sticky="e")
+        auto_upload.grid(row=3, column=0, columnspan=2, padx=8, pady=18, sticky="e")
         add_tooltip(auto_upload, "هنگام اجرای Upload قبلی، اجرای جدید شروع نمی‌شود.")
         ttk.Label(
             upload,
             text="فایل‌های موقت نادیده گرفته می‌شوند. فقط نتیجه صریحاً سالم به مرحله نهایی ارسال می‌شود.",
             style="MutedCard.TLabel",
             anchor="e",
-        ).grid(row=3, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 2))
+        ).grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 2))
         upload.columnconfigure(1, weight=1)
         upload.columnconfigure(2, weight=1)
         upload.columnconfigure(3, weight=1)
+
+    def _build_download_tab(self):
+        card = ttk.LabelFrame(
+            self.download_tab,
+            text="دانلود کنترل‌شده بین دو محیط",
+            style="Card.TLabelframe",
+            padding=18,
+        )
+        card.pack(fill="both", expand=True)
+        ttk.Label(card, text="محیط اجرا", style="Card.TLabel").grid(
+            row=0, column=0, sticky="e", padx=8, pady=8
+        )
+        environment = ttk.Combobox(
+            card,
+            textvariable=self.environment_label,
+            values=list(ENVIRONMENT_LABELS.values()),
+            state="readonly",
+            justify="right",
+        )
+        environment.grid(row=0, column=1, sticky="ew", padx=8, pady=8)
+        environment.bind("<<ComboboxSelected>>", lambda _event: self._save_preferences(False))
+        ttk.Label(card, text="پوشه مقصد", style="Card.TLabel").grid(
+            row=1, column=0, sticky="e", padx=8, pady=8
+        )
+        destination = ttk.Entry(card, textvariable=self.download_dir, justify="left")
+        destination.grid(row=1, column=1, sticky="ew", padx=8, pady=8)
+        self._button(
+            card,
+            "انتخاب پوشه",
+            self._choose_download_folder,
+            "پوشه محلی دریافت فایل‌ها را انتخاب می‌کند.",
+        ).grid(row=1, column=2, padx=6, pady=8, sticky="ew")
+        controls = ttk.Frame(card)
+        controls.grid(row=2, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+        self._button(
+            controls,
+            "بروزرسانی فهرست",
+            self._refresh_downloads,
+            "فقط فایل‌های دارای نشان محیط مقابل را نمایش می‌دهد.",
+        ).pack(side="right", padx=4)
+        self._button(
+            controls,
+            "دانلود انتخاب‌شده‌ها",
+            self._download_selected,
+            "فایل‌های انتخابی را بدون بازنویسی فایل موجود دانلود می‌کند.",
+            "Primary.TButton",
+        ).pack(side="right", padx=4)
+        self.download_tree = ttk.Treeview(
+            card,
+            columns=("name", "size", "origin"),
+            show="headings",
+            selectmode="extended",
+            height=12,
+        )
+        self.download_tree.heading("name", text="نام فایل")
+        self.download_tree.heading("size", text="حجم")
+        self.download_tree.heading("origin", text="منشأ")
+        self.download_tree.column("name", width=480, anchor="e")
+        self.download_tree.column("size", width=110, anchor="center")
+        self.download_tree.column("origin", width=110, anchor="center")
+        self.download_tree.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+        ttk.Label(
+            card,
+            text="فایل بدون نشان منشأ یا فایل متعلق به همین محیط هرگز دانلود نمی‌شود.",
+            style="MutedCard.TLabel",
+            anchor="e",
+        ).grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
+        card.columnconfigure(1, weight=1)
+        card.rowconfigure(3, weight=1)
+
+    def _environment_code(self) -> str:
+        return ENVIRONMENT_CODES.get(self.environment_label.get(), "")
+
+    def _choose_download_folder(self):
+        selected = filedialog.askdirectory(
+            title="پوشه مقصد دانلود را انتخاب کنید",
+            initialdir=self.download_dir.get() or str(self.base_dir),
+        )
+        if selected:
+            self.download_dir.set(selected)
+            self._save_preferences(announce=False)
+
+    def _refresh_downloads(self):
+        environment = self._environment_code()
+        if not environment:
+            messagebox.showerror("خطا", "ابتدا محیط اجرا را مشخص کنید.")
+            return
+        if self.download_task_id is not None:
+            return
+        self.download_task_id = self._submit(
+            "list_downloadable_files",
+            self.browser.list_downloadable_files,
+            environment,
+            success=self._display_download_files,
+        )
+
+    def _display_download_files(self, records):
+        self.remote_downloads = {record["remote_id"]: record for record in records}
+        for item in self.download_tree.get_children():
+            self.download_tree.delete(item)
+        for record in records:
+            size = f"{record['size'] / 1024:.1f} KB"
+            origin = ENVIRONMENT_LABELS.get(record["origin"], record["origin"])
+            self.download_tree.insert(
+                "", "end", iid=record["remote_id"], values=(record["name"], size, origin)
+            )
+        self.status.set(f"{len(records)} فایل قابل دانلود پیدا شد.")
+
+    def _download_selected(self):
+        environment = self._environment_code()
+        if not environment:
+            messagebox.showerror("خطا", "ابتدا محیط اجرا را مشخص کنید.")
+            return
+        destination = Path(self.download_dir.get()).expanduser()
+        if not destination.is_dir():
+            messagebox.showerror("خطا", "ابتدا پوشه مقصد معتبر انتخاب کنید.")
+            return
+        selected = [
+            self.remote_downloads[item]
+            for item in self.download_tree.selection()
+            if item in self.remote_downloads
+        ]
+        if not selected:
+            messagebox.showerror("خطا", "حداقل یک فایل را انتخاب کنید.")
+            return
+        if self.download_task_id is not None:
+            return
+        self.download_task_id = self._submit(
+            "download_files",
+            self.browser.download_files,
+            selected,
+            destination,
+            environment,
+            Path(self.watch_dir.get()).expanduser() if self.watch_dir.get() else None,
+            success=self._after_download,
+        )
+
+    def _after_download(self, result):
+        message = (
+            f"دانلود تمام شد؛ موفق: {result['downloaded']}، "
+            f"تکراری: {result['skipped']}، خطا: {result['failed']}"
+        )
+        self.status.set(message)
+        self._log("success" if not result["failed"] else "warning", message)
 
     def _choose_upload_folder(self):
         selected = filedialog.askdirectory(
@@ -792,6 +964,15 @@ class CaptchaLabApp:
             if not automatic:
                 messagebox.showerror("خطا", "محدودیت تعداد و حجم نباید منفی باشد.")
             return
+        environment = self._environment_code()
+        if not environment:
+            if automatic:
+                if self.auto_upload_warning != "environment":
+                    self._log("warning", "آپلود خودکار تا تعیین محیط اجرا متوقف است.")
+                    self.auto_upload_warning = "environment"
+            else:
+                messagebox.showerror("خطا", "ابتدا محیط اجرا را مشخص کنید.")
+            return
         self.auto_upload_warning = None
         if not automatic:
             self.auto_upload_suspended = False
@@ -805,6 +986,7 @@ class CaptchaLabApp:
             folder,
             max_files,
             max_size,
+            environment,
             announce=not automatic,
         )
 
@@ -839,6 +1021,8 @@ class CaptchaLabApp:
                 max_files_per_run=self.max_files_per_run.get(),
                 max_file_size_mb=self.max_file_size_mb.get(),
                 auto_upload_enabled=self.auto_upload_enabled.get(),
+                environment=self._environment_code(),
+                download_dir=self.download_dir.get(),
             )
             settings.validate()
         except (tk.TclError, ValueError) as error:
@@ -1078,6 +1262,8 @@ class CaptchaLabApp:
             callback = self.callbacks.pop(task_id, None)
             if task_id == self.upload_task_id:
                 self.upload_task_id = None
+            if task_id == self.download_task_id:
+                self.download_task_id = None
             if operation == "close":
                 self.browser.executor.shutdown(wait=False, cancel_futures=True)
                 self.root.destroy()
@@ -1090,7 +1276,9 @@ class CaptchaLabApp:
                 continue
             if callback:
                 callback(payload)
-            if operation == "collect_batch":
+            if operation in {"list_downloadable_files", "download_files"}:
+                pass
+            elif operation == "collect_batch":
                 state = "کامل شد" if payload["count"] == payload["requested"] else "متوقف شد"
                 message = f"Batch {state}؛ {payload['count']} تصویر: {payload['batch_dir']}"
                 self.status.set(message)

@@ -12,8 +12,11 @@ from ft_auto_uploader import (
     list_upload_history,
     open_state,
     parse_args,
+    parse_transfer_name,
     scan_result,
     select_files_for_run,
+    staged_transfer_path,
+    tagged_transfer_name,
     upload_file,
     wait_for_file_manager,
 )
@@ -99,6 +102,8 @@ class ReadyFilesTest(unittest.TestCase):
                 "ft_auto_uploader.py",
                 "--watch-dir",
                 "C:\\FT-Test",
+                "--environment",
+                "thinclient",
                 "--max-files-per-run",
                 "5",
                 "--max-file-size-mb",
@@ -111,6 +116,22 @@ class ReadyFilesTest(unittest.TestCase):
         self.assertEqual(args.max_files_per_run, 5)
         self.assertEqual(args.max_file_size_mb, 12.5)
         self.assertTrue(args.run_once)
+
+    def test_transfer_names_are_explicit_and_staging_preserves_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "report.pdf"
+            source.write_bytes(b"content")
+
+            with staged_transfer_path(source, "thinclient") as staged:
+                self.assertEqual(staged.name, "__FT_TC__report.pdf")
+                self.assertEqual(staged.read_bytes(), b"content")
+            self.assertFalse(staged.exists())
+
+        self.assertEqual(
+            parse_transfer_name(tagged_transfer_name("report.pdf", "intranet")),
+            ("intranet", "report.pdf"),
+        )
+        self.assertIsNone(parse_transfer_name("report.pdf"))
 
 
 class UploadHistoryTest(unittest.TestCase):
@@ -170,15 +191,20 @@ class UploadInteractionTest(unittest.TestCase):
         response_context.__enter__.return_value = response_event
         page.expect_response.return_value = response_context
 
-        with (
-            patch("ft_auto_uploader._multipart_file_field", return_value="file"),
-            patch("ft_auto_uploader._write_network_debug"),
-        ):
-            result = upload_file(page, Path("document.pdf"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "document.pdf"
+            source.write_bytes(b"document")
+            with (
+                patch("ft_auto_uploader._multipart_file_field", return_value="file"),
+                patch("ft_auto_uploader._write_network_debug"),
+            ):
+                result = upload_file(page, source, "thinclient")
+            staged_path = Path(chooser.set_files.call_args.args[0])
 
         page.expect_file_chooser.assert_called_once_with(timeout=10_000)
         upload_button.first.click.assert_called_once_with()
-        chooser.set_files.assert_called_once_with("document.pdf")
+        self.assertEqual(staged_path.name, "__FT_TC__document.pdf")
+        self.assertFalse(staged_path.exists())
         confirmation_button.last.click.assert_called_once_with()
         self.assertEqual(result, "scan-1")
 

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import os
 import queue
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -17,11 +20,17 @@ from captcha_training import (
     save_unlabeled_batch_sample,
 )
 from ft_auto_uploader import (
+    downloaded_fingerprint_exists,
+    downloaded_remote_id_exists,
     list_upload_history,
     list_candidate_files,
+    opposite_environment,
     open_state,
+    parse_transfer_name,
     process_file,
+    save_download_state,
     select_files_for_run,
+    validate_environment,
     wait_for_file_manager,
 )
 from ft_browser import launch_persistent_session
@@ -32,6 +41,10 @@ DEFAULT_CAPTCHA_SELECTOR = "img[src^='data:image/']"
 USERNAME_SELECTOR = "div.itc-card__content > div > div:nth-of-type(1) input"
 PASSWORD_SELECTOR = "div.itc-card__content > div > div:nth-of-type(2) input"
 CAPTCHA_INPUT_SELECTOR = "div:nth-of-type(3) input"
+FILE_MANAGER_API = "https://ft.nioc.ir/filemanager-api/api/v1/"
+GROUPS_URL = FILE_MANAGER_API + "Group/GetAllUserGroups"
+FILES_URL = FILE_MANAGER_API + "File/GetFilesAndFolders"
+DOWNLOAD_URL = FILE_MANAGER_API + "File/DownloadFile"
 
 
 @dataclass(frozen=True)
@@ -135,6 +148,20 @@ class BrowserSession:
     def _emit(self, level: str, message: str) -> None:
         self.results.put(RuntimeLog(level, message))
 
+    def _ensure_file_manager(self, login_timeout_minutes: float = 15.0) -> None:
+        if self.page is None:
+            self.open()
+
+        def manual_login(upload_button, timeout_ms):
+            self._emit("warning", "ورود لازم است؛ ورود دستی را در مرورگر کامل کنید.")
+            upload_button.wait_for(state="visible", timeout=timeout_ms)
+
+        wait_for_file_manager(
+            self.page,
+            int(login_timeout_minutes * 60_000),
+            manual_login,
+        )
+
     def open(self):
         if self.context is None:
             from playwright.sync_api import sync_playwright
@@ -235,6 +262,7 @@ class BrowserSession:
         folder: Path,
         max_files: int,
         max_file_size_mb: float,
+        environment: str = "",
         scan_timeout_minutes: float = 30.0,
         login_timeout_minutes: float = 15.0,
     ):
@@ -243,13 +271,6 @@ class BrowserSession:
             raise ValueError("پوشه انتخاب‌شده وجود ندارد.")
         if max_files < 0 or max_file_size_mb < 0:
             raise ValueError("محدودیت تعداد و حجم نباید منفی باشد.")
-        if self.page is None:
-            self.open()
-
-        def manual_login(upload_button, timeout_ms):
-            self._emit("warning", "ورود لازم است؛ ورود دستی را در مرورگر کامل کنید.")
-            upload_button.wait_for(state="visible", timeout=timeout_ms)
-
         selected, oversized = select_files_for_run(
             list_candidate_files(folder),
             max_files,
@@ -260,11 +281,8 @@ class BrowserSession:
         if not selected:
             return {"processed": 0, "failed": 0, "oversized": len(oversized)}
 
-        wait_for_file_manager(
-            self.page,
-            int(login_timeout_minutes * 60_000),
-            manual_login,
-        )
+        validate_environment(environment)
+        self._ensure_file_manager(login_timeout_minutes)
 
         connection = open_state(self.profile_dir.parent / "state.db")
         failed = 0
@@ -283,6 +301,7 @@ class BrowserSession:
                         folder / "_uploaded",
                         scan_timeout_minutes * 60,
                         self._emit,
+                        environment,
                     )
                     consecutive_failures = 0
                 except Exception as error:
@@ -306,6 +325,166 @@ class BrowserSession:
         if stopped:
             result["stopped"] = True
         return result
+
+    @staticmethod
+    def _response_data(response, operation: str):
+        if not response.ok:
+            raise RuntimeError(f"{operation} با HTTP {response.status} ناموفق بود.")
+        payload = response.json()
+        if payload.get("isSuccess") is not True:
+            raise RuntimeError(payload.get("message") or f"{operation} ناموفق بود.")
+        return payload.get("data")
+
+    def _default_group_id(self) -> str:
+        groups = self._response_data(
+            self.context.request.get(GROUPS_URL), "دریافت گروه‌های فایل"
+        )
+        groups = groups if isinstance(groups, list) else []
+        enabled = [group for group in groups if group.get("isDisabled") is not True]
+        selected = next((group for group in enabled if group.get("isDefault") is True), None)
+        if selected is None and len(enabled) == 1:
+            selected = enabled[0]
+        if not selected or not selected.get("id"):
+            raise RuntimeError("گروه پیش‌فرض و یکتای مدیریت فایل مشخص نیست.")
+        return str(selected["id"])
+
+    def list_downloadable_files(
+        self, environment: str, login_timeout_minutes: float = 15.0
+    ) -> list[dict]:
+        expected_origin = opposite_environment(environment)
+        self._ensure_file_manager(login_timeout_minutes)
+        group_id = self._default_group_id()
+        page_size = 100
+        page_index = 1
+        records = []
+        while True:
+            data = self._response_data(
+                self.context.request.put(
+                    FILES_URL,
+                    data={
+                        "pageSize": page_size,
+                        "pageIndex": page_index,
+                        "WithThumbnail": False,
+                        "groupId": group_id,
+                        "SortBy": 0,
+                        "SortDirection": 0,
+                    },
+                ),
+                "دریافت فهرست فایل‌ها",
+            )
+            if not isinstance(data, dict):
+                raise RuntimeError("پاسخ فهرست فایل‌ها معتبر نیست.")
+            items = data.get("items") or []
+            for item in items:
+                if item.get("directory") is True:
+                    continue
+                remote_name = f"{item.get('name') or ''}{item.get('extension') or ''}"
+                parsed = parse_transfer_name(remote_name)
+                if not parsed or parsed[0] != expected_origin:
+                    continue
+                remote_id = item.get("id")
+                item_group_id = item.get("groupId") or group_id
+                if not remote_id or not item_group_id:
+                    continue
+                records.append(
+                    {
+                        "remote_id": str(remote_id),
+                        "group_id": str(item_group_id),
+                        "remote_name": remote_name,
+                        "name": parsed[1],
+                        "size": int(item.get("size") or 0),
+                        "origin": parsed[0],
+                    }
+                )
+            total_count = int(data.get("totalCount") or 0)
+            if page_index * page_size >= total_count:
+                break
+            page_index += 1
+        return records
+
+    @staticmethod
+    def _unused_destination(folder: Path, name: str) -> Path:
+        destination = folder / name
+        counter = 1
+        while destination.exists():
+            destination = folder / f"{Path(name).stem}.{counter}{Path(name).suffix}"
+            counter += 1
+        return destination
+
+    def download_files(
+        self,
+        records: list[dict],
+        destination_dir: Path,
+        environment: str,
+        upload_dir: Path | None = None,
+    ) -> dict:
+        expected_origin = opposite_environment(environment)
+        destination_dir = Path(destination_dir).resolve()
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        if upload_dir and Path(upload_dir).resolve() == destination_dir:
+            raise ValueError("پوشه دانلود نباید همان پوشه ورودی آپلود باشد.")
+        self._ensure_file_manager()
+        connection = open_state(self.profile_dir.parent / "state.db")
+        downloaded = skipped = failed = 0
+        try:
+            for record in records:
+                try:
+                    parsed = parse_transfer_name(str(record.get("remote_name") or ""))
+                    if not parsed or parsed[0] != expected_origin:
+                        raise ValueError("منشأ فایل با محیط مقابل تطابق ندارد.")
+                    if parsed[1] != record.get("name"):
+                        raise ValueError("نام فایل دانلودی معتبر نیست.")
+                    remote_id = str(record.get("remote_id") or "")
+                    group_id = str(record.get("group_id") or "")
+                    if not remote_id or not group_id:
+                        raise ValueError("شناسه فایل دانلودی ناقص است.")
+                    if downloaded_remote_id_exists(connection, remote_id):
+                        skipped += 1
+                        self._emit("info", f"قبلاً دانلود شده و نادیده گرفته شد: {parsed[1]}")
+                        continue
+                    response = self.context.request.get(
+                        DOWNLOAD_URL,
+                        params={"fileId": remote_id, "groupId": group_id},
+                        timeout=120_000,
+                    )
+                    if not response.ok:
+                        raise RuntimeError(f"دانلود با HTTP {response.status} ناموفق بود.")
+                    content = response.body()
+                    file_hash = hashlib.sha256(content).hexdigest()
+                    if downloaded_fingerprint_exists(connection, file_hash):
+                        skipped += 1
+                        self._emit(
+                            "info", f"محتوای تکراری دانلود نشد: {parsed[1]}"
+                        )
+                        continue
+                    destination = self._unused_destination(destination_dir, parsed[1])
+                    temporary = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            dir=destination_dir, suffix=".part", delete=False
+                        ) as stream:
+                            temporary = Path(stream.name)
+                            stream.write(content)
+                        os.replace(temporary, destination)
+                        temporary = None
+                    finally:
+                        if temporary is not None:
+                            temporary.unlink(missing_ok=True)
+                    save_download_state(
+                        connection,
+                        remote_id,
+                        file_hash,
+                        destination,
+                        expected_origin,
+                    )
+                    downloaded += 1
+                    self._emit("success", f"دانلود شد: {destination.name}")
+                except Exception as error:
+                    failed += 1
+                    self._emit("error", f"دانلود ناموفق بود: {error}")
+        finally:
+            connection.close()
+        return {"downloaded": downloaded, "skipped": skipped, "failed": failed}
 
     def upload_history(self):
         connection = open_state(self.profile_dir.parent / "state.db")
