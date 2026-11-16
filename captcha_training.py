@@ -236,25 +236,37 @@ def _load_image(image_source, image_module, np_module):
 
 
 def build_model(sequence_length: int):
-    """Build a compact segmentation-free CNN with one 10-class head per position."""
+    """Build one shared digit classifier over equal horizontal image regions."""
     _, _, tf = _import_ml_dependencies()
     layers = tf.keras.layers
     inputs = tf.keras.Input(
         (MODEL_HEIGHT, MODEL_WIDTH, MODEL_CHANNELS), name="captcha"
     )
-    x = layers.RandomContrast(0.15)(inputs)
-    x = layers.RandomTranslation(0.04, 0.04, fill_mode="nearest")(x)
-    for filters in (24, 48, 72):
-        x = layers.Conv2D(filters, 3, padding="same", activation="relu")(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.MaxPooling2D(2)(x)
-    x = layers.AveragePooling2D(pool_size=(6, 1), name="height_pool")(x)
-    x = layers.Flatten()(x)
-    x = layers.Dense(64, activation="relu")(x)
-    x = layers.Dropout(0.25)(x)
-    x = layers.Dense(sequence_length * 10)(x)
-    x = layers.Reshape((sequence_length, 10))(x)
-    outputs = layers.Softmax(axis=-1, name="digits")(x)
+    region_width = MODEL_WIDTH // sequence_length
+    x = layers.Rescaling(scale=-1.0, offset=1.0, name="foreground_contrast")(
+        inputs
+    )
+    x = layers.Resizing(
+        MODEL_HEIGHT,
+        region_width * sequence_length,
+        name="position_resize",
+    )(x)
+    x = layers.Reshape(
+        (MODEL_HEIGHT, sequence_length, region_width, MODEL_CHANNELS)
+    )(x)
+    x = layers.Permute((2, 1, 3, 4), name="position_features")(x)
+
+    digit_inputs = tf.keras.Input(
+        (MODEL_HEIGHT, region_width, MODEL_CHANNELS), name="digit"
+    )
+    digit = layers.Flatten()(digit_inputs)
+    digit_outputs = layers.Dense(10, activation="softmax")(digit)
+    digit_classifier = tf.keras.Model(
+        digit_inputs, digit_outputs, name="digit_classifier"
+    )
+    outputs = layers.TimeDistributed(
+        digit_classifier, name="shared_digit_classifier"
+    )(x)
     model = tf.keras.Model(inputs, outputs, name="ft_captcha_multihead")
     model.compile(
         optimizer="adam",

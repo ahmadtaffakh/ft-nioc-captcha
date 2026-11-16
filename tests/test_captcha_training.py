@@ -19,12 +19,20 @@ from captcha_training import (
 
 
 class ModelArchitectureTest(unittest.TestCase):
-    def test_preserves_horizontal_features_with_compact_dense_head(self):
+    def test_uses_one_shared_classifier_for_all_digit_positions(self):
         model = build_model(sequence_length=4)
 
         self.assertEqual(model.output_shape, (None, 4, 10))
-        self.assertEqual(model.get_layer("height_pool").output.shape, (None, 1, 20, 72))
-        self.assertLess(model.count_params(), 150_000)
+        self.assertEqual(model.get_layer("foreground_contrast").get_config()["scale"], -1.0)
+        self.assertEqual(
+            model.get_layer("position_features").output.shape,
+            (None, 4, 50, 40, 3),
+        )
+        self.assertEqual(
+            model.get_layer("shared_digit_classifier").output.shape,
+            (None, 4, 10),
+        )
+        self.assertLess(model.count_params(), 70_000)
 
 
 class DigitNormalizationTest(unittest.TestCase):
