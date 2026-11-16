@@ -361,3 +361,76 @@ def predict_image(image_bytes: bytes, model_bundle) -> tuple[str, float]:
     if len(text) != int(metadata["sequence_length"]):
         raise RuntimeError("طول خروجی مدل با metadata سازگار نیست.")
     return text, confidence
+
+
+def predict_batch(batch_dir: Path, model_dir: Path) -> dict:
+    """Write model predictions to the third batch CSV column atomically."""
+    batch_dir = Path(batch_dir)
+    _, labels_path = dataset_paths(batch_dir)
+    if not labels_path.is_file():
+        raise ValueError("فایل labels.csv در پوشه Batch پیدا نشد.")
+
+    with labels_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if not reader.fieldnames or not {"filename", "label"}.issubset(reader.fieldnames):
+            raise ValueError("فایل Batch باید ستون‌های filename و label داشته باشد.")
+        rows = list(reader)
+        extra_fields = [
+            field
+            for field in reader.fieldnames
+            if field not in {"filename", "label", "prediction"}
+        ]
+
+    if not rows:
+        raise ValueError("Batch هیچ نمونه‌ای ندارد.")
+
+    model_bundle = load_model(model_dir)
+    matches = 0
+    evaluated = 0
+    output_rows = []
+    for row_number, row in enumerate(rows, start=2):
+        filename = (row.get("filename") or "").strip()
+        image_path = (batch_dir / filename).resolve()
+        try:
+            image_path.relative_to(batch_dir.resolve())
+        except ValueError as error:
+            raise ValueError(f"مسیر تصویر ردیف {row_number} نامعتبر است.") from error
+        if not filename or not image_path.is_file():
+            raise ValueError(f"تصویر ردیف {row_number} پیدا نشد: {filename}")
+
+        prediction, _confidence = predict_image(image_path.read_bytes(), model_bundle)
+        output_row = {
+            field: row.get(field, "")
+            for field in ["filename", "label", *extra_fields]
+        }
+        output_row["prediction"] = prediction
+        output_rows.append(output_row)
+
+        label = (row.get("label") or "").strip()
+        if label:
+            try:
+                normalized_label = normalize_digits(label)
+            except ValueError as error:
+                raise ValueError(f"برچسب ردیف {row_number} معتبر نیست.") from error
+            evaluated += 1
+            matches += normalized_label == prediction
+
+    fieldnames = ["filename", "label", "prediction", *extra_fields]
+    temporary_labels = labels_path.with_suffix(".tmp")
+    try:
+        with temporary_labels.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(output_rows)
+        os.replace(temporary_labels, labels_path)
+    except Exception:
+        temporary_labels.unlink(missing_ok=True)
+        raise
+
+    return {
+        "count": len(output_rows),
+        "evaluated": evaluated,
+        "matches": matches,
+        "exact_match": matches / evaluated if evaluated else None,
+        "labels_path": str(labels_path),
+    }

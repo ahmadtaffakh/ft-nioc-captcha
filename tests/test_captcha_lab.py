@@ -12,7 +12,7 @@ from tkinter import ttk
 
 from captcha_lab import AUTO_UPLOAD_INTERVAL_MS, CaptchaLabApp
 from ft_auto_uploader import open_state, process_file
-from ft_runtime import BrowserSession, capture_captcha_bytes
+from ft_runtime import BrowserSession, RuntimeResult, capture_captcha_bytes
 
 
 class CaptchaCaptureTest(unittest.TestCase):
@@ -43,6 +43,30 @@ class CaptchaCaptureTest(unittest.TestCase):
 
 
 class BatchCaptureTest(unittest.TestCase):
+    def test_batch_prediction_result_displays_exact_match_rate(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.results = queue.Queue()
+        app.results.put(
+            RuntimeResult(
+                "predict_batch",
+                "predict_batch",
+                True,
+                {"count": 2, "evaluated": 2, "matches": 1, "exact_match": 0.5},
+            )
+        )
+        app.callbacks = {}
+        app.upload_task_id = None
+        app.download_task_id = None
+        app.status = Mock()
+        app._log = Mock()
+        app.root = Mock()
+
+        app._poll_results()
+
+        message = "تست Batch تمام شد؛ 2 تصویر — تطبیق دقیق: 1 از 2 (50.0%)"
+        app.status.set.assert_called_once_with(message)
+        app._log.assert_called_once_with("success", message)
+
     def test_upload_history_reports_each_status(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
         app._log = Mock()

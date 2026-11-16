@@ -3,11 +3,13 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from captcha_training import (
     decode_image_data_url,
     import_labeled_batch,
     normalize_digits,
+    predict_batch,
     read_labels,
     save_unlabeled_batch_sample,
     save_labeled_sample,
@@ -86,6 +88,64 @@ class DatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ردیف 2"):
                 import_labeled_batch(batch_dir, dataset_dir, 5)
             self.assertEqual(read_labels(dataset_dir), [])
+
+    def test_predicts_batch_into_third_column_and_reports_exact_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            batch_dir = Path(temporary) / "batch"
+            save_unlabeled_batch_sample(batch_dir, b"first", 1)
+            save_unlabeled_batch_sample(batch_dir, b"second", 2)
+            labels_path = batch_dir / "labels.csv"
+            with labels_path.open("w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["filename", "label"])
+                writer.writeheader()
+                writer.writerow({"filename": "images/captcha-000001.png", "label": "۱۲۳۴۵"})
+                writer.writerow({"filename": "images/captcha-000002.png", "label": "67890"})
+
+            model_bundle = object()
+            with (
+                patch("captcha_training.load_model", return_value=model_bundle) as load,
+                patch(
+                    "captcha_training.predict_image",
+                    side_effect=[("12345", 0.9), ("67891", 0.8)],
+                ) as predict,
+            ):
+                result = predict_batch(batch_dir, Path(temporary) / "model")
+
+            load.assert_called_once_with(Path(temporary) / "model")
+            self.assertEqual(
+                [call.args[0] for call in predict.call_args_list],
+                [b"first", b"second"],
+            )
+            with labels_path.open("r", encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream)
+                self.assertEqual(reader.fieldnames, ["filename", "label", "prediction"])
+                rows = list(reader)
+            self.assertEqual([row["prediction"] for row in rows], ["12345", "67891"])
+            self.assertEqual(result["count"], 2)
+            self.assertEqual(result["matches"], 1)
+            self.assertEqual(result["evaluated"], 2)
+            self.assertEqual(result["exact_match"], 0.5)
+
+    def test_batch_prediction_failure_preserves_original_csv(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            batch_dir = Path(temporary) / "batch"
+            save_unlabeled_batch_sample(batch_dir, b"first", 1)
+            save_unlabeled_batch_sample(batch_dir, b"second", 2)
+            labels_path = batch_dir / "labels.csv"
+            original = labels_path.read_bytes()
+
+            with (
+                patch("captcha_training.load_model", return_value=object()),
+                patch(
+                    "captcha_training.predict_image",
+                    side_effect=[("12345", 0.9), RuntimeError("prediction failed")],
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "prediction failed"):
+                    predict_batch(batch_dir, Path(temporary) / "model")
+
+            self.assertEqual(labels_path.read_bytes(), original)
+            self.assertFalse(labels_path.with_suffix(".tmp").exists())
 
 
 if __name__ == "__main__":

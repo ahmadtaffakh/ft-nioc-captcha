@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from captcha_training import (
     import_labeled_batch,
     load_model,
+    predict_batch,
     predict_image,
     read_labels,
     save_labeled_sample,
@@ -487,6 +488,12 @@ class CaptchaLabApp:
             self._import_batch,
             "پوشه Batch تکمیل‌شده در Excel را اعتبارسنجی و وارد Dataset می‌کند.",
         ).grid(row=3, column=1, columnspan=2, pady=(4, 8), sticky="ew")
+        self._button(
+            labeling,
+            "تست مدل روی Batch",
+            self._predict_batch,
+            "پیش‌بینی مدل را در ستون سوم labels.csv می‌نویسد و نرخ تطبیق را گزارش می‌کند.",
+        ).grid(row=3, column=3, padx=(6, 0), pady=(4, 8), sticky="ew")
         labeling.columnconfigure(1, weight=1)
         labeling.columnconfigure(3, weight=1)
 
@@ -1214,6 +1221,28 @@ class CaptchaLabApp:
         self.status.set("در حال پیش‌بینی...")
         threading.Thread(target=work, daemon=True).start()
 
+    def _predict_batch(self):
+        selected = filedialog.askdirectory(
+            title="پوشه Batch را انتخاب کنید",
+            initialdir=str(self.batch_root),
+        )
+        if not selected:
+            return
+
+        def work():
+            try:
+                result = predict_batch(Path(selected), self.model_dir)
+                self.results.put(
+                    RuntimeResult("predict_batch", "predict_batch", True, result)
+                )
+            except Exception as error:
+                self.results.put(
+                    RuntimeResult("predict_batch", "predict_batch", False, str(error))
+                )
+
+        self.status.set("در حال تست مدل روی Batch...")
+        threading.Thread(target=work, daemon=True).start()
+
     def _login(self):
         try:
             minimum_confidence = self.minimum_confidence.get()
@@ -1298,6 +1327,19 @@ class CaptchaLabApp:
             elif operation == "predict":
                 text, confidence = payload
                 message = f"تشخیص: {text} — حداقل اطمینان: {confidence:.1%}"
+                self.status.set(message)
+                self._log("success", message)
+            elif operation == "predict_batch":
+                if payload["exact_match"] is None:
+                    comparison = "نرخ تطبیق قابل محاسبه نیست؛ ستون label خالی است"
+                else:
+                    comparison = (
+                        f"تطبیق دقیق: {payload['matches']} از {payload['evaluated']} "
+                        f"({payload['exact_match']:.1%})"
+                    )
+                message = (
+                    f"تست Batch تمام شد؛ {payload['count']} تصویر — {comparison}"
+                )
                 self.status.set(message)
                 self._log("success", message)
             elif operation == "upload_history":
