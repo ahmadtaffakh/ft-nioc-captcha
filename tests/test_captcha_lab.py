@@ -189,7 +189,7 @@ class BatchCaptureTest(unittest.TestCase):
             finally:
                 session.executor.shutdown(wait=False, cancel_futures=True)
 
-            wait.assert_called_once()
+            wait.assert_not_called()
             self.assertEqual(result, {"processed": 0, "failed": 0, "oversized": 0})
 
     def test_upload_stops_only_after_two_consecutive_errors(self):

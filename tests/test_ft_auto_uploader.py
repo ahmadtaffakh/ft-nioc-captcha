@@ -149,21 +149,35 @@ class ScanResultTest(unittest.TestCase):
 class FileManagerLoginTest(unittest.TestCase):
     def test_ready_file_manager_does_not_call_login_handler(self):
         page = Mock()
+        page.url = "https://ft.nioc.ir/filemanager/app/files/root"
+        upload_button = page.locator.return_value.first
+        login_handler = Mock()
+
+        wait_for_file_manager(page, 60_000, login_handler)
+
+        page.goto.assert_not_called()
+        upload_button.wait_for.assert_called_once_with(
+            state="visible", timeout=10_000
+        )
+        login_handler.assert_not_called()
+
+    def test_non_file_manager_page_opens_file_manager_before_waiting(self):
+        page = Mock()
+        page.url = "https://ft.nioc.ir/dargah/systems?grp=all"
         upload_button = page.locator.return_value.first
         login_handler = Mock()
 
         wait_for_file_manager(page, 60_000, login_handler)
 
         page.goto.assert_called_once_with(
-            "https://ft.nioc.ir/", wait_until="domcontentloaded"
-        )
-        upload_button.wait_for.assert_called_once_with(
-            state="visible", timeout=10_000
+            "https://ft.nioc.ir/filemanager/app/files/00000000-0000-0000-0000-000000000000",
+            wait_until="domcontentloaded",
         )
         login_handler.assert_not_called()
 
     def test_login_handler_runs_after_initial_wait_fails(self):
         page = Mock()
+        page.url = "https://ft.nioc.ir/filemanager/app/files/root"
         upload_button = page.locator.return_value.first
         upload_button.wait_for.side_effect = TimeoutError
         login_handler = Mock()
@@ -174,6 +188,7 @@ class FileManagerLoginTest(unittest.TestCase):
 
     def test_default_handler_preserves_manual_login_wait(self):
         page = Mock()
+        page.url = "https://ft.nioc.ir/filemanager/app/files/root"
         upload_button = page.locator.return_value.first
         upload_button.wait_for.side_effect = [TimeoutError, None]
 

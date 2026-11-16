@@ -250,11 +250,6 @@ class BrowserSession:
             self._emit("warning", "ورود لازم است؛ ورود دستی را در مرورگر کامل کنید.")
             upload_button.wait_for(state="visible", timeout=timeout_ms)
 
-        wait_for_file_manager(
-            self.page,
-            int(login_timeout_minutes * 60_000),
-            manual_login,
-        )
         selected, oversized = select_files_for_run(
             list_candidate_files(folder),
             max_files,
@@ -264,6 +259,12 @@ class BrowserSession:
             self._emit("warning", f"به‌دلیل عبور از سقف حجم رد شد: {path.name}")
         if not selected:
             return {"processed": 0, "failed": 0, "oversized": len(oversized)}
+
+        wait_for_file_manager(
+            self.page,
+            int(login_timeout_minutes * 60_000),
+            manual_login,
+        )
 
         connection = open_state(self.profile_dir.parent / "state.db")
         failed = 0

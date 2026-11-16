@@ -24,6 +24,9 @@ from ft_browser import app_data_dir, launch_persistent_session
 
 
 BASE_URL = "https://ft.nioc.ir/"
+FILE_MANAGER_URL = (
+    BASE_URL + "filemanager/app/files/00000000-0000-0000-0000-000000000000"
+)
 QUARANTINE_URL = BASE_URL + "sarp-api/api/Scan/GetAllQuarantinedFilesList"
 QUEUE_URL = BASE_URL + "sarp-api/api/Scan/QueueForUploadFileFromQuarantineToSaman"
 UPLOAD_RESPONSE_SUFFIX = "/sarp-api/api/Scan/UploadFile"
@@ -306,8 +309,9 @@ def wait_for_manual_login(upload_button, login_timeout_ms: int) -> None:
 
 
 def wait_for_file_manager(page, login_timeout_ms: int, login_handler=None) -> None:
-    page.goto(BASE_URL, wait_until="domcontentloaded")
     upload_button = page.locator("button.mr-5").first
+    if "/filemanager/" not in page.url:
+        page.goto(FILE_MANAGER_URL, wait_until="domcontentloaded")
     try:
         upload_button.wait_for(state="visible", timeout=10_000)
     except Exception:
