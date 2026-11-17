@@ -13,8 +13,13 @@ def app_data_dir() -> Path:
 def launch_persistent_session(playwright, profile_dir: Path):
     profile_dir = Path(profile_dir)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    context = playwright.chromium.launch_persistent_context(
-        str(profile_dir), headless=False
-    )
+    chromium = playwright.chromium
+    if os.name == "nt" and not Path(chromium.executable_path).is_file():
+        # Use Playwright's supported Chrome channel when the browser download is absent.
+        context = chromium.launch_persistent_context(
+            str(profile_dir), headless=False, channel="chrome"
+        )
+    else:
+        context = chromium.launch_persistent_context(str(profile_dir), headless=False)
     page = context.pages[0] if context.pages else context.new_page()
     return context, page
