@@ -104,6 +104,49 @@ class BatchCaptureTest(unittest.TestCase):
         app._upload_folder(automatic=True)
         app.browser.upload_folder.assert_not_called()
 
+    def test_auto_download_uses_configured_interval_and_skips_overlap(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.root = Mock()
+        app.closing = False
+        app.auto_download_suspended = False
+        app.auto_download_enabled = Mock()
+        app.auto_download_enabled.get.return_value = True
+        app.download_interval_seconds = Mock()
+        app.download_interval_seconds.get.return_value = 30
+        app._download_available = Mock()
+
+        app._auto_download_tick()
+
+        app._download_available.assert_called_once_with(automatic=True)
+        app.root.after.assert_called_once_with(30_000, app._auto_download_tick)
+
+        app.download_task_id = "download-1"
+        app._environment_code = Mock(return_value="intranet")
+        app.download_dir = Mock()
+        app.browser = Mock()
+        app._download_available = CaptchaLabApp._download_available.__get__(app)
+        app._download_available(automatic=True)
+        app.browser.download_available_files.assert_not_called()
+
+    def test_download_available_combines_listing_and_download(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        records = [{"remote_id": "file-1"}]
+        expected = {"downloaded": 1, "skipped": 0, "failed": 0}
+        session.list_downloadable_files = Mock(return_value=records)
+        session.download_files = Mock(return_value=expected)
+        try:
+            actual = session.download_available_files(
+                "intranet", Path("downloads"), Path("uploads")
+            )
+        finally:
+            session.executor.shutdown(wait=False, cancel_futures=True)
+
+        self.assertEqual(actual, expected)
+        session.list_downloadable_files.assert_called_once_with("intranet")
+        session.download_files.assert_called_once_with(
+            records, Path("downloads"), "intranet", Path("uploads")
+        )
+
     def test_collects_requested_images_and_refreshes_between_them(self):
         with tempfile.TemporaryDirectory() as temporary:
             session = BrowserSession(Path(temporary) / "profile", queue.Queue())

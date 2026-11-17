@@ -492,6 +492,17 @@ class BrowserSession:
             connection.close()
         return {"downloaded": downloaded, "skipped": skipped, "failed": failed}
 
+    def download_available_files(
+        self,
+        environment: str,
+        destination_dir: Path,
+        upload_dir: Path | None = None,
+    ) -> dict:
+        records = self.list_downloadable_files(environment)
+        if not records:
+            return {"downloaded": 0, "skipped": 0, "failed": 0}
+        return self.download_files(records, destination_dir, environment, upload_dir)
+
     def upload_history(self):
         connection = open_state(self.profile_dir.parent / "state.db")
         try:

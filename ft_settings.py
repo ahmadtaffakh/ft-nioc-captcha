@@ -11,7 +11,7 @@ from pathlib import Path
 from ctypes import wintypes
 
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 SETTINGS_FILENAME = "settings.json"
 CREDENTIALS_FILENAME = "credentials.dat"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
@@ -32,6 +32,8 @@ class AppSettings:
     auto_upload_enabled: bool = True
     environment: str = ""
     download_dir: str = ""
+    auto_download_enabled: bool = False
+    download_interval_seconds: int = 10
 
     def validate(self) -> None:
         if not 1 <= self.sequence_length <= 10:
@@ -52,6 +54,10 @@ class AppSettings:
             raise ValueError("سقف حجم فایل باید بین صفر و ۱۰۰۰۰۰ مگابایت باشد.")
         if not isinstance(self.auto_upload_enabled, bool):
             raise ValueError("وضعیت آپلود خودکار معتبر نیست.")
+        if not isinstance(self.auto_download_enabled, bool):
+            raise ValueError("وضعیت دانلود خودکار معتبر نیست.")
+        if not 5 <= self.download_interval_seconds <= 3600:
+            raise ValueError("بازه دانلود خودکار باید بین ۵ و ۳۶۰۰ ثانیه باشد.")
         if self.environment not in {"", "thinclient", "intranet"}:
             raise ValueError("محیط اجرا معتبر نیست.")
 

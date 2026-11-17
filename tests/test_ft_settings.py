@@ -26,6 +26,8 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.minimum_confidence, 0.30)
         self.assertEqual(settings.login_attempts, 5)
         self.assertTrue(settings.auto_upload_enabled)
+        self.assertFalse(settings.auto_download_enabled)
+        self.assertEqual(settings.download_interval_seconds, 10)
 
     def test_settings_round_trip_and_ignore_future_fields(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -38,6 +40,8 @@ class SettingsTest(unittest.TestCase):
                 epochs=12,
                 minimum_confidence=0.8,
                 login_attempts=7,
+                auto_download_enabled=True,
+                download_interval_seconds=30,
             )
             path = save_settings(base_dir, expected)
             payload = json.loads(path.read_text(encoding="utf-8"))

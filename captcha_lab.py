@@ -137,6 +137,8 @@ class CaptchaLabApp:
         self.download_task_id = None
         self.auto_upload_suspended = False
         self.auto_upload_warning = None
+        self.auto_download_suspended = False
+        self.auto_download_warning = None
         self.startup_warnings = []
 
         try:
@@ -171,6 +173,12 @@ class CaptchaLabApp:
             value=ENVIRONMENT_LABELS[settings.environment]
         )
         self.download_dir = tk.StringVar(value=settings.download_dir)
+        self.auto_download_enabled = tk.BooleanVar(
+            value=settings.auto_download_enabled
+        )
+        self.download_interval_seconds = tk.IntVar(
+            value=settings.download_interval_seconds
+        )
         self.remote_downloads = {}
         self.username = tk.StringVar(value=stored_username)
         self.password = tk.StringVar(value=stored_password)
@@ -187,6 +195,7 @@ class CaptchaLabApp:
         self._update_sample_count()
         self.root.after(100, self._poll_results)
         self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
+        self.root.after(self._download_interval_ms(), self._auto_download_tick)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
@@ -885,13 +894,40 @@ class CaptchaLabApp:
             "پوشه محلی دریافت فایل‌ها را انتخاب می‌کند.",
         ).grid(row=1, column=2, padx=6, pady=8, sticky="ew")
         controls = ttk.Frame(card)
-        controls.grid(row=2, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+        controls.grid(row=3, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
         self._button(
             controls,
             "بروزرسانی فهرست",
             self._refresh_downloads,
             "فقط فایل‌های دارای نشان محیط مقابل را نمایش می‌دهد.",
         ).pack(side="right", padx=4)
+        auto_download = ttk.Checkbutton(
+            card,
+            text="دانلود خودکار",
+            variable=self.auto_download_enabled,
+            command=self._toggle_auto_download,
+        )
+        auto_download.grid(row=2, column=0, sticky="e", padx=8, pady=8)
+        add_tooltip(
+            auto_download,
+            "در بازه تعیین‌شده همه فایل‌های مجاز محیط مقابل را دانلود می‌کند.",
+        )
+        ttk.Label(card, text="بازه بررسی (ثانیه)", style="Card.TLabel").grid(
+            row=2, column=1, sticky="e", padx=8, pady=8
+        )
+        interval_input = ttk.Spinbox(
+            card,
+            from_=5,
+            to=3600,
+            textvariable=self.download_interval_seconds,
+            width=10,
+            justify="center",
+        )
+        interval_input.grid(row=2, column=2, sticky="w", padx=8, pady=8)
+        add_tooltip(
+            interval_input,
+            "فاصله بررسی خودکار فایل‌های قابل دانلود؛ مقدار مجاز ۵ تا ۳۶۰۰ ثانیه.",
+        )
         self._button(
             controls,
             "دانلود انتخاب‌شده‌ها",
@@ -912,15 +948,15 @@ class CaptchaLabApp:
         self.download_tree.column("name", width=480, anchor="e")
         self.download_tree.column("size", width=110, anchor="center")
         self.download_tree.column("origin", width=110, anchor="center")
-        self.download_tree.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+        self.download_tree.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
         ttk.Label(
             card,
             text="فایل بدون نشان منشأ یا فایل متعلق به همین محیط هرگز دانلود نمی‌شود.",
             style="MutedCard.TLabel",
             anchor="e",
-        ).grid(row=4, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
+        ).grid(row=5, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
         card.columnconfigure(1, weight=1)
-        card.rowconfigure(3, weight=1)
+        card.rowconfigure(4, weight=1)
 
     def _environment_code(self) -> str:
         return ENVIRONMENT_CODES.get(self.environment_label.get(), "")
@@ -992,6 +1028,67 @@ class CaptchaLabApp:
     def _after_download(self, result):
         message = (
             f"دانلود تمام شد؛ موفق: {result['downloaded']}، "
+            f"تکراری: {result['skipped']}، خطا: {result['failed']}"
+        )
+        self.status.set(message)
+        self._log("success" if not result["failed"] else "warning", message)
+
+    def _download_interval_ms(self):
+        try:
+            seconds = self.download_interval_seconds.get()
+        except tk.TclError:
+            seconds = 10
+        return max(5, min(3600, seconds)) * 1000
+
+    def _toggle_auto_download(self):
+        self.auto_download_suspended = False
+        self.auto_download_warning = None
+        self._save_preferences(announce=False)
+        state = "فعال" if self.auto_download_enabled.get() else "غیرفعال"
+        self._log("info", f"دانلود خودکار {state} شد.")
+
+    def _auto_download_tick(self):
+        if self.closing:
+            return
+        if self.auto_download_enabled.get() and not self.auto_download_suspended:
+            self._download_available(automatic=True)
+        self.root.after(self._download_interval_ms(), self._auto_download_tick)
+
+    def _download_available(self, automatic=False):
+        if self.download_task_id is not None:
+            return
+        environment = self._environment_code()
+        destination = Path(self.download_dir.get()).expanduser()
+        warning = None
+        if not environment:
+            warning = "ابتدا محیط اجرا را مشخص کنید."
+        elif not destination.is_dir():
+            warning = "ابتدا پوشه مقصد معتبر انتخاب کنید."
+        if warning:
+            if automatic:
+                if self.auto_download_warning != warning:
+                    self._log("warning", f"دانلود خودکار منتظر است: {warning}")
+                    self.auto_download_warning = warning
+            else:
+                messagebox.showerror("خطا", warning)
+            return
+        self.auto_download_warning = None
+        self._save_preferences(announce=False)
+        self.download_task_id = self._submit(
+            "auto_download_files" if automatic else "download_available_files",
+            self.browser.download_available_files,
+            environment,
+            destination,
+            Path(self.watch_dir.get()).expanduser() if self.watch_dir.get() else None,
+            success=self._after_auto_download if automatic else self._after_download,
+            announce=not automatic,
+        )
+
+    def _after_auto_download(self, result):
+        if not result["downloaded"] and not result["failed"]:
+            return
+        message = (
+            f"دانلود خودکار تمام شد؛ موفق: {result['downloaded']}، "
             f"تکراری: {result['skipped']}، خطا: {result['failed']}"
         )
         self.status.set(message)
@@ -1107,6 +1204,8 @@ class CaptchaLabApp:
                 auto_upload_enabled=self.auto_upload_enabled.get(),
                 environment=self._environment_code(),
                 download_dir=self.download_dir.get(),
+                auto_download_enabled=self.auto_download_enabled.get(),
+                download_interval_seconds=self.download_interval_seconds.get(),
             )
             settings.validate()
         except (tk.TclError, ValueError) as error:
@@ -1408,12 +1507,20 @@ class CaptchaLabApp:
             if not succeeded:
                 self.status.set("عملیات ناموفق بود.")
                 self._log("error", f"{operation}: {payload}")
-                if operation != "auto_upload_folder":
+                if operation == "auto_download_files":
+                    self.auto_download_suspended = True
+                    self.status.set("دانلود خودکار پس از خطا متوقف شد.")
+                elif operation != "auto_upload_folder":
                     messagebox.showerror("خطا", payload)
                 continue
             if callback:
                 callback(payload)
-            if operation in {"list_downloadable_files", "download_files"}:
+            if operation in {
+                "list_downloadable_files",
+                "download_files",
+                "download_available_files",
+                "auto_download_files",
+            }:
                 pass
             elif operation == "collect_batch":
                 state = "کامل شد" if payload["count"] == payload["requested"] else "متوقف شد"
