@@ -13,6 +13,7 @@ from tkinter import ttk
 from captcha_lab import AUTO_UPLOAD_INTERVAL_MS, CaptchaLabApp
 from ft_auto_uploader import open_state, process_file
 from ft_runtime import BrowserSession, RuntimeResult, capture_captcha_bytes
+from ft_settings import load_settings
 
 
 class CaptchaCaptureTest(unittest.TestCase):
@@ -43,6 +44,18 @@ class CaptchaCaptureTest(unittest.TestCase):
 
 
 class BatchCaptureTest(unittest.TestCase):
+    def test_download_api_rejects_html_and_redirects(self):
+        html = Mock(ok=True, status=200, headers={"content-type": "text/html"})
+        html.json.side_effect = ValueError("Expecting value")
+        redirect = Mock(ok=False, status=302)
+
+        for response, expected in [(html, "HTML"), (redirect, "HTTP 302")]:
+            with self.subTest(status=response.status):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    BrowserSession._response_data(response, "دریافت گروه‌های فایل")
+
+        redirect.json.assert_not_called()
+
     def test_batch_prediction_result_displays_exact_match_rate(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
         app.results = queue.Queue()
@@ -128,6 +141,43 @@ class BatchCaptureTest(unittest.TestCase):
         app._download_available(automatic=True)
         app.browser.download_available_files.assert_not_called()
 
+    def test_thinclient_test_mode_starts_and_repeats_downloads(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.root = Mock()
+        app.closing = False
+        app.auto_download_suspended = True
+        app.auto_download_enabled = Mock()
+        app.auto_download_enabled.get.return_value = False
+        app.thinclient_test_download = Mock()
+        app.thinclient_test_download.get.return_value = True
+        app._environment_code = Mock(return_value="thinclient")
+        app.download_dir = Mock()
+        app.watch_dir = Mock()
+        app.watch_dir.get.return_value = ""
+        app.download_task_id = None
+        app._download_interval_ms = Mock(return_value=10_000)
+        app._log = Mock()
+        app._save_preferences = Mock()
+        app.browser = Mock()
+        app._submit = Mock(return_value="download-1")
+        destination = Path("downloads")
+
+        with patch("captcha_lab._existing_directory", return_value=destination):
+            app._toggle_test_download()
+            app._auto_download_tick()
+            app._submit.assert_called_once_with(
+                "auto_download_files", app.browser.download_available_files,
+                "thinclient", destination, None, True, app.download_cancelled,
+                success=app._after_auto_download, announce=False,
+            )
+            app.download_task_id = None
+            app._auto_download_tick()
+            self.assertEqual(app._submit.call_count, 2)
+            app.download_task_id = None
+            app.thinclient_test_download.get.return_value = False
+            app._auto_download_tick()
+            self.assertEqual(app._submit.call_count, 2)
+
     def test_download_available_combines_listing_and_download(self):
         session = BrowserSession(Path("profile"), queue.Queue())
         records = [{"remote_id": "file-1"}]
@@ -146,6 +196,43 @@ class BatchCaptureTest(unittest.TestCase):
         session.download_files.assert_called_once_with(
             records, Path("downloads"), "intranet", Path("uploads")
         )
+
+    def test_stopping_queued_download_skips_listing(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        session.list_downloadable_files = Mock()
+        cancelled = Mock()
+        cancelled.is_set.return_value = True
+        with session.executor:
+            result = session.download_available_files(
+                "thinclient", Path("downloads"), cancelled=cancelled,
+            )
+        session.list_downloadable_files.assert_not_called()
+        self.assertEqual(result, {"downloaded": 0, "skipped": 0, "failed": 0})
+
+    def test_only_confirmed_auto_login_is_saved(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.base_dir = Path("profile")
+        app.credential_status = Mock()
+        app._log = Mock()
+        with patch("captcha_lab.save_credentials") as save:
+            app._after_login("ورود قبلاً انجام شده است.", "user", "password")
+            save.assert_not_called()
+            app._after_login("ورود موفق", "user", "password")
+            save.assert_called_once_with(app.base_dir, "user", "password")
+
+    def test_save_entered_credentials_works_before_login(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.base_dir = Path("profile")
+        app.username = Mock()
+        app.username.get.return_value = "user"
+        app.password = Mock()
+        app.password.get.return_value = "password"
+        app.credential_status = Mock()
+        app._log = Mock()
+        with patch("captcha_lab.save_credentials") as save:
+            app._save_entered_credentials()
+        save.assert_called_once_with(app.base_dir, "user", "password")
+        app.credential_status.set.assert_called_once()
 
     def test_refresh_downloads_enables_thinclient_loopback_only_when_selected(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
@@ -255,6 +342,8 @@ class BatchCaptureTest(unittest.TestCase):
         session = BrowserSession(Path("profile"), queue.Queue())
         context = Mock()
         page = Mock()
+        page.is_closed.return_value = False
+        page.url = "about:blank"
         playwright = Mock()
         starter = Mock()
         starter.start.return_value = playwright
@@ -286,9 +375,87 @@ class BatchCaptureTest(unittest.TestCase):
         launch.assert_called_once_with(playwright, Path("profile"))
         self.assertEqual(page.goto.call_count, 2)
 
+    def test_failed_browser_launch_stops_playwright_before_retry(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        failed_playwright, retry_playwright = Mock(), Mock()
+        sync_api = types.ModuleType("playwright.sync_api")
+        starter = Mock()
+        starter.start.side_effect = [failed_playwright, retry_playwright]
+        sync_api.sync_playwright = Mock(return_value=starter)
+        context, page = Mock(), Mock()
+        page.url = "about:blank"
+
+        with (
+            patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
+            patch(
+                "ft_runtime.launch_persistent_session",
+                side_effect=[RuntimeError("Chromium launch failed"), (context, page)],
+            ) as launch,
+            session.executor as worker,
+        ):
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Chromium launch failed"):
+                    worker.submit(session.open).result()
+                failed_playwright.stop.assert_called_once_with()
+                self.assertIsNone(session.playwright)
+                self.assertIsNone(session.page)
+
+                worker.submit(session.open).result()
+                launch.assert_called_with(retry_playwright, Path("profile"))
+                self.assertIs(session.page, page)
+            finally:
+                worker.submit(session.close).result()
+
+    def test_reopens_browser_after_context_close(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        old_driver, new_driver = Mock(), Mock()
+        new_context, new_page = Mock(), Mock()
+        new_page.url = "about:blank"
+        session.playwright = old_driver
+        session.context = Mock()
+        session.page = Mock()
+        session._on_context_closed(session.context)
+        sync_api = types.ModuleType("playwright.sync_api")
+        sync_api.sync_playwright = Mock()
+        sync_api.sync_playwright.return_value.start.return_value = new_driver
+        with (
+            patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
+            patch("ft_runtime.launch_persistent_session", return_value=(new_context, new_page)),
+            session.executor as worker,
+        ):
+            try:
+                worker.submit(session.open).result()
+                old_driver.stop.assert_called_once_with()
+                self.assertIs(session.page, new_page)
+                new_page.goto.assert_called_once()
+            finally:
+                worker.submit(session.close).result()
+
+    def test_start_resumes_existing_ft_session_from_sign_in_prompt(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        session.context, session.page = Mock(), Mock()
+        page = session.page
+        page.is_closed.return_value = False
+        page.url = "https://ft.nioc.ir/dargah/user/sign-in"
+        page.get_by_text.return_value.is_visible.return_value = True
+        page.goto.side_effect = lambda url, **_kwargs: setattr(page, "url", url)
+        with (
+            session.executor,
+            patch("ft_runtime.load_model") as load,
+        ):
+            result = session.login("", "", "img", Path("model"), 0.3, 1)
+        self.assertEqual(result, "ورود قبلاً انجام شده است.")
+        self.assertTrue(page.goto.call_args.args[0].startswith("https://ft.nioc.ir/filemanager/"))
+        page.goto.assert_called_once()
+        load.assert_not_called()
+
     def test_manual_login_reuses_open_browser_page(self):
         session = BrowserSession(Path("profile"), queue.Queue())
+        session.context = Mock()
         session.page = Mock()
+        session.page.is_closed.return_value = False
+        session.page.url = "https://ft.nioc.ir/dargah/user/sign-in"
+        session.page.get_by_text.return_value.is_visible.return_value = False
         try:
             message = session.manual_login()
         finally:
@@ -302,8 +469,11 @@ class BatchCaptureTest(unittest.TestCase):
 
     def test_automatic_login_uses_configured_attempt_limit(self):
         session = BrowserSession(Path("profile"), queue.Queue())
+        session.context = Mock()
         session.page = Mock()
+        session.page.is_closed.return_value = False
         session.page.url = "https://ft.nioc.ir/dargah/user/sign-in"
+        session.page.get_by_text.return_value.is_visible.return_value = False
         session.page.wait_for_url.side_effect = RuntimeError("wrong captcha")
         try:
             with (
@@ -319,12 +489,35 @@ class BatchCaptureTest(unittest.TestCase):
                         Path("model"),
                         0.3,
                         5,
+                        2.5,
                     )
         finally:
             session.executor.shutdown(wait=False, cancel_futures=True)
 
         self.assertEqual(predict.call_count, 5)
         self.assertEqual(session.page.goto.call_count, 4)
+        self.assertEqual(session.page.wait_for_timeout.call_args_list, [call(2500)] * 5)
+
+    def test_low_confidence_captcha_is_filled_without_submission(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        session.context, session.page = Mock(), Mock()
+        session.page.is_closed.return_value = False
+        session.page.url = "https://ft.nioc.ir/dargah/user/sign-in"
+        session.page.get_by_text.return_value.is_visible.return_value = False
+        captcha_input = Mock()
+        session.page.locator.side_effect = [Mock(), Mock(), Mock(), captcha_input]
+        with (
+            session.executor,
+            patch("ft_runtime.load_model"),
+            patch("ft_runtime.capture_captcha_bytes"),
+            patch("ft_runtime.predict_image", return_value=("0123", 0.2)),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "پس از 1 تلاش"):
+                session.login("username", "password", "img", Path("model"), 0.3, 1)
+        captcha_input.fill.assert_called_once_with("0123")
+        captcha_input.press.assert_not_called()
+        session.page.wait_for_timeout.assert_not_called()
+        session.page.reload.assert_not_called()
 
     def test_empty_upload_folder_finishes_without_database_work(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -417,6 +610,7 @@ class BatchCaptureTest(unittest.TestCase):
             }
             download = Mock(ok=True, status=200)
             download.body.return_value = b"payload"
+            session.page.evaluate.return_value = "test-role"
             session.context.request.get.side_effect = [groups, download]
             session.context.request.put.return_value = listing
             destination = base / "downloads"
@@ -446,6 +640,20 @@ class BatchCaptureTest(unittest.TestCase):
                 session.executor.shutdown(wait=False, cancel_futures=True)
 
         self.assertEqual([record["name"] for record in records], ["report.pdf"])
+        self.assertEqual(
+            session.context.request.get.call_args_list,
+            [
+                call("https://ft.nioc.ir/webapi/api/v1/Group/GetAllUserGroups",
+                     headers={"X-Role": "test-role"}, max_redirects=0),
+                call("https://ft.nioc.ir/webapi/api/v1/File/DownloadFile",
+                     headers={"X-Role": "test-role"}, max_redirects=0,
+                     params={"fileId": "remote-1", "groupId": "group-1"},
+                     timeout=120_000),
+            ],
+        )
+        listing_url, = session.context.request.put.call_args.args
+        self.assertEqual(listing_url, "https://ft.nioc.ir/webapi/api/v1/File/GetFilesAndFolders")
+        self.assertEqual(session.context.request.put.call_args.kwargs["headers"], {"X-Role": "test-role"})
         self.assertEqual(result, {"downloaded": 1, "skipped": 0, "failed": 0})
         self.assertEqual(reverse, "downloaded")
 
@@ -508,17 +716,12 @@ class BatchCaptureTest(unittest.TestCase):
 class CredentialPersistenceTest(unittest.TestCase):
     def test_successful_automatic_login_saves_credentials(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
-        app.remember_credentials = Mock()
-        app.remember_credentials.get.return_value = True
         app.base_dir = Path("app-data")
-        app.username = Mock()
-        app.username.get.return_value = "user"
-        app.password = Mock()
-        app.password.get.return_value = "password"
+        app.credential_status = Mock()
         app._log = Mock()
 
         with patch("captcha_lab.save_credentials") as save:
-            app._after_login("ورود موفق؛ CAPTCHA: 12345")
+            app._after_login("ورود موفق؛ CAPTCHA: 12345", "user", "password")
 
         save.assert_called_once_with(Path("app-data"), "user", "password")
         logged_messages = [call.args[1] for call in app._log.call_args_list]
@@ -526,11 +729,8 @@ class CredentialPersistenceTest(unittest.TestCase):
 
     def test_unverified_existing_session_does_not_save_credentials(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
-        app.remember_credentials = Mock()
-        app.remember_credentials.get.return_value = True
-
         with patch("captcha_lab.save_credentials") as save:
-            app._after_login("ورود قبلاً انجام شده است.")
+            app._after_login("ورود قبلاً انجام شده است.", "user", "password")
 
         save.assert_not_called()
 
@@ -546,6 +746,8 @@ class OrganizationalUiTest(unittest.TestCase):
 
     def tearDown(self):
         self.app.browser.executor.shutdown(wait=False, cancel_futures=True)
+        for callback in self.root.tk.splitlist(self.root.tk.call("after", "info")):
+            self.root.after_cancel(callback)
         self.root.destroy()
         self.temporary.cleanup()
 
@@ -554,21 +756,49 @@ class OrganizationalUiTest(unittest.TestCase):
         self.assertEqual(
             names,
             [
+                "اطلاعات ورود",
+                "آپلود و دانلود",
                 "اتصال و CAPTCHA",
                 "داده و آموزش",
-                "ورود سامانه",
-                "آپلود فایل",
-                "دانلود فایل",
                 "خروجی و گزارش",
             ],
         )
+        nested = self.app.transfer_notebook
+        self.assertEqual(
+            [nested.tab(tab, "text").strip() for tab in nested.tabs()],
+            ["آپلود فایل", "دانلود فایل"],
+        )
+
+    def test_valid_form_changes_are_saved_automatically(self):
+        self.assertEqual(load_settings(self.app.base_dir).captcha_submit_delay_seconds, 1.0)
+        self.app.watch_dir.set("upload-folder")
+        self.app.download_dir.set("download-folder")
+        self.app.captcha_submit_delay_seconds.set(3.5)
+        self.app.thinclient_test_download.set(True)
+        saved = tk.BooleanVar(self.root, value=False)
+        self.root.after(400, lambda: saved.set(True))
+        self.root.wait_variable(saved)
+        settings = load_settings(self.app.base_dir)
+        self.assertEqual(settings.watch_dir, "upload-folder")
+        self.assertEqual(settings.download_dir, "download-folder")
+        self.assertEqual(settings.captcha_submit_delay_seconds, 3.5)
+        self.assertTrue(settings.thinclient_test_download)
 
     def test_status_bar_distinguishes_running_from_last_status(self):
         self.assertEqual(self.app.activity_status.get(), "آماده")
         self.assertEqual(self.app.status.get(), "آماده")
+        self.assertEqual(self.app.status_progress.master.grid_size()[1], 3)
 
-        self.app._mark_task_started("test-task")
+        task_id = "auto_download_files-1"
+        self.app.queued_browser_tasks.add(task_id)
+        self.app._mark_task_started(task_id)
         self.assertEqual(self.app.activity_status.get(), "در حال اجرا")
+        self.assertEqual(self.app.current_work.get(), "1 کار در صف")
+
+        self.app.queued_browser_tasks.remove(task_id)
+        self.app._sync_activity_status()
+        self.assertEqual(self.app.current_work.get(), "دانلود خودکار")
+        self.assertEqual(self.app.status.get(), "آماده")
 
         self.app.active_tasks.clear()
         self.app._sync_activity_status()
@@ -579,7 +809,7 @@ class OrganizationalUiTest(unittest.TestCase):
             self.app.data_actions: 3,
             self.app.training_actions: 2,
             self.app.login_actions: 2,
-            self.app.login_settings_actions: 2,
+            self.app.login_settings_actions: 3,
         }
         for frame, expected_count in expected_counts.items():
             with self.subTest(frame=str(frame)):

@@ -20,6 +20,7 @@ from captcha_training import (
     save_unlabeled_batch_sample,
 )
 from ft_auto_uploader import (
+    FILE_MANAGER_URL,
     downloaded_fingerprint_exists,
     downloaded_remote_id_exists,
     list_upload_history,
@@ -37,11 +38,12 @@ from ft_browser import launch_persistent_session
 
 
 LOGIN_URL = "https://ft.nioc.ir/dargah/user/sign-in"
+FILE_MANAGER_PREFIX = "https://ft.nioc.ir/filemanager/"
 DEFAULT_CAPTCHA_SELECTOR = "img[src^='data:image/']"
 USERNAME_SELECTOR = "div.itc-card__content > div > div:nth-of-type(1) input"
 PASSWORD_SELECTOR = "div.itc-card__content > div > div:nth-of-type(2) input"
-CAPTCHA_INPUT_SELECTOR = "div:nth-of-type(3) input"
-FILE_MANAGER_API = "https://ft.nioc.ir/filemanager-api/api/v1/"
+CAPTCHA_INPUT_SELECTOR = "div.itc-card__content > div > div:nth-of-type(3) input:visible"
+FILE_MANAGER_API = "https://ft.nioc.ir/webapi/api/v1/"
 GROUPS_URL = FILE_MANAGER_API + "Group/GetAllUserGroups"
 FILES_URL = FILE_MANAGER_API + "File/GetFilesAndFolders"
 DOWNLOAD_URL = FILE_MANAGER_API + "File/DownloadFile"
@@ -55,6 +57,11 @@ class RuntimeResult:
     operation: str
     succeeded: bool
     payload: Any
+
+
+@dataclass(frozen=True)
+class RuntimeStarted:
+    task_id: str
 
 
 @dataclass(frozen=True)
@@ -120,20 +127,25 @@ class BrowserSession:
     """Serialize all synchronous Playwright access on one browser thread."""
 
     def __init__(
-        self, profile_dir: Path, results: queue.Queue[RuntimeResult | RuntimeLog]
+        self, profile_dir: Path, results: queue.Queue[RuntimeResult | RuntimeLog | RuntimeStarted]
     ):
         self.profile_dir = Path(profile_dir)
         self.results = results
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ft-browser")
         self.playwright = None
         self.context = None
+        self.context_closed = False
         self.page = None
         self.batch_cancelled = threading.Event()
         self._task_numbers = itertools.count(1)
 
     def submit(self, operation: str, function: Callable, *args) -> str:
         task_id = f"{operation}-{next(self._task_numbers)}"
-        future = self.executor.submit(function, *args)
+        def run():
+            self.results.put(RuntimeStarted(task_id))
+            return function(*args)
+
+        future = self.executor.submit(run)
 
         def completed(done):
             try:
@@ -163,21 +175,66 @@ class BrowserSession:
         )
 
     def open(self):
+        self._open_page()
+        try:
+            self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        except Exception:
+            if not self.context_closed and not self.page.is_closed():
+                raise
+            self._open_page()
+            self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        self._resume_file_manager()
+        return "مرورگر باز شد و برای عملیات بعدی باز می‌ماند."
+
+    def _resume_file_manager(self) -> bool:
+        if self.page.url.split("?", 1)[0] == LOGIN_URL:
+            return_to_portal = self.page.get_by_text("بازگشت به درگاه", exact=True)
+            username = self.page.locator(USERNAME_SELECTOR)
+            return_to_portal.or_(username).first.wait_for(state="visible", timeout=10_000)
+            if return_to_portal.is_visible():
+                self.page.goto(FILE_MANAGER_URL, wait_until="domcontentloaded")
+                if not self.page.url.startswith(FILE_MANAGER_PREFIX):
+                    raise RuntimeError("نشست فعال FT به مدیریت فایل منتقل نشد.")
+        if not self.page.url.startswith(FILE_MANAGER_PREFIX):
+            return False
+        self.page.locator("button.mr-5").first.wait_for(state="visible", timeout=10_000)
+        return self.page.url.startswith(FILE_MANAGER_PREFIX)
+
+    def _open_page(self):
+        if self.context_closed:
+            self.close()
         if self.context is None:
             from playwright.sync_api import sync_playwright
 
             self.playwright = sync_playwright().start()
-            self.context, self.page = launch_persistent_session(
-                self.playwright, self.profile_dir
-            )
-        self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        return "مرورگر باز شد و برای عملیات بعدی باز می‌ماند."
+            try:
+                self.context, self.page = launch_persistent_session(
+                    self.playwright, self.profile_dir
+                )
+                self.context.on("close", self._on_context_closed)
+            except Exception:
+                # A failed launch can leave the Sync API's loop active on this worker.
+                try:
+                    self.close()
+                except Exception as cleanup_error:
+                    self._emit("warning", f"توقف Playwright ناموفق بود: {cleanup_error}")
+                raise
+        elif self.page.is_closed():
+            try:
+                self.page = self.context.new_page()
+            except Exception:
+                if not self.context_closed:
+                    raise
+                self.close()
+                self._open_page()
+
+    def _on_context_closed(self, _context):
+        self.context_closed = True
 
     def manual_login(self):
-        if self.page is None:
-            self.open()
-        else:
-            self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        self.open()
+        if self.page.url.startswith(FILE_MANAGER_PREFIX):
+            return "نشست فعال FT بازیابی شد و مدیریت فایل باز است."
         return "صفحه ورود دستی باز شد؛ اطلاعات ورود و CAPTCHA را در مرورگر وارد کنید."
 
     def capture(self, selector: str):
@@ -229,31 +286,48 @@ class BrowserSession:
         model_dir: Path,
         minimum_confidence: float,
         max_attempts: int,
+        captcha_submit_delay_seconds: float = 1.0,
     ):
-        if not username or not password:
-            raise ValueError("نام کاربری و رمز عبور را وارد کنید.")
         if not 1 <= max_attempts <= 20:
             raise ValueError("تعداد تلاش ورود باید بین ۱ و ۲۰ باشد.")
-        if self.page is None:
+        if not 0 <= captcha_submit_delay_seconds <= 60:
+            raise ValueError("تأخیر ارسال CAPTCHA باید بین صفر و ۶۰ ثانیه باشد.")
+        if self.context is None or self.context_closed or self.page.is_closed():
             self.open()
+        try:
+            self.page.evaluate("() => true")
+        except Exception:
+            if not self.context_closed and not self.page.is_closed():
+                raise
+            self.open()
+        if self.page.url.split("?", 1)[0] != LOGIN_URL and not self.page.url.startswith(FILE_MANAGER_PREFIX):
+            self.open()
+        if self._resume_file_manager():
+            return "ورود قبلاً انجام شده است."
+        if not username or not password:
+            raise ValueError("نام کاربری و رمز عبور را وارد کنید.")
         model_bundle = load_model(model_dir)
         last_prediction = None
         for attempt in range(1, max_attempts + 1):
-            if "/filemanager/" in self.page.url:
+            if attempt > 1 and self._resume_file_manager():
                 return "ورود قبلاً انجام شده است."
             self.page.locator(USERNAME_SELECTOR).fill(username)
             self.page.locator(PASSWORD_SELECTOR).fill(password)
             image_bytes = capture_captcha_bytes(self.page, selector)
             prediction, confidence = predict_image(image_bytes, model_bundle)
             last_prediction = f"{prediction} ({confidence:.1%})"
-            if confidence < minimum_confidence:
-                self.page.reload(wait_until="domcontentloaded")
-                continue
             captcha_input = self.page.locator(CAPTCHA_INPUT_SELECTOR)
             captcha_input.fill(prediction)
+            if confidence < minimum_confidence:
+                self._emit("warning", f"تلاش {attempt} از {max_attempts}: اطمینان CAPTCHA پایین بود؛ فرم ارسال نشد.")
+                if attempt < max_attempts:
+                    self.page.reload(wait_until="domcontentloaded")
+                continue
+            if captcha_submit_delay_seconds:
+                self.page.wait_for_timeout(captcha_submit_delay_seconds * 1000)
             captcha_input.press("Enter")
             try:
-                self.page.wait_for_url("**/filemanager/**", timeout=10_000)
+                self.page.wait_for_url("https://ft.nioc.ir/filemanager/**", timeout=10_000)
                 return f"ورود موفق؛ CAPTCHA: {last_prediction}"
             except Exception:
                 if attempt < max_attempts:
@@ -334,16 +408,39 @@ class BrowserSession:
 
     @staticmethod
     def _response_data(response, operation: str):
+        if 300 <= response.status < 400:
+            raise RuntimeError(
+                f"{operation} به مسیر دیگری هدایت شد (HTTP {response.status}). "
+                "وضعیت ورود به مدیریت فایل FT را بررسی کنید."
+            )
         if not response.ok:
             raise RuntimeError(f"{operation} با HTTP {response.status} ناموفق بود.")
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError:
+            content_type = response.headers.get("content-type", "").lower()
+            detail = "صفحهٔ HTML" if content_type.startswith("text/html") else "پاسخ خالی یا نامعتبر"
+            raise RuntimeError(
+                f"{operation} به‌جای JSON، {detail} برگرداند (HTTP {response.status}). "
+                "وضعیت ورود و مسیر API مدیریت فایل FT را بررسی کنید."
+            ) from None
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"ساختار پاسخ JSON برای {operation} معتبر نیست.")
         if payload.get("isSuccess") is not True:
             raise RuntimeError(payload.get("message") or f"{operation} ناموفق بود.")
         return payload.get("data")
 
-    def _default_group_id(self) -> str:
+    def _file_manager_headers(self) -> dict[str, str]:
+        role = self.page.evaluate(
+            """() => location.origin === 'https://ft.nioc.ir'
+                ? sessionStorage.getItem('unitRoleCode') : null"""
+        )
+        return {"X-Role": role} if isinstance(role, str) and role else {}
+
+    def _default_group_id(self, headers: dict[str, str]) -> str:
         groups = self._response_data(
-            self.context.request.get(GROUPS_URL), "دریافت گروه‌های فایل"
+            self.context.request.get(GROUPS_URL, headers=headers, max_redirects=0),
+            "دریافت گروه‌های فایل",
         )
         groups = groups if isinstance(groups, list) else []
         enabled = [group for group in groups if group.get("isDisabled") is not True]
@@ -365,7 +462,8 @@ class BrowserSession:
         if allow_same_origin and environment == "thinclient":
             allowed_origins.add(environment)
         self._ensure_file_manager(login_timeout_minutes)
-        group_id = self._default_group_id()
+        headers = self._file_manager_headers()
+        group_id = self._default_group_id(headers)
         page_size = 100
         page_index = 1
         records = []
@@ -373,6 +471,8 @@ class BrowserSession:
             data = self._response_data(
                 self.context.request.put(
                     FILES_URL,
+                    headers=headers,
+                    max_redirects=0,
                     data={
                         "pageSize": page_size,
                         "pageIndex": page_index,
@@ -430,6 +530,7 @@ class BrowserSession:
         environment: str,
         upload_dir: Path | None = None,
         allow_same_origin: bool = False,
+        cancelled: threading.Event | None = None,
     ) -> dict:
         expected_origin = opposite_environment(environment)
         allowed_origins = {expected_origin}
@@ -440,10 +541,13 @@ class BrowserSession:
         if upload_dir and Path(upload_dir).resolve() == destination_dir:
             raise ValueError("پوشه دانلود نباید همان پوشه ورودی آپلود باشد.")
         self._ensure_file_manager()
+        headers = self._file_manager_headers()
         connection = open_state(self.profile_dir.parent / "state.db")
         downloaded = skipped = failed = 0
         try:
             for record in records:
+                if cancelled is not None and cancelled.is_set():
+                    break
                 try:
                     parsed = parse_transfer_name(str(record.get("remote_name") or ""))
                     if not parsed or parsed[0] not in allowed_origins:
@@ -460,6 +564,8 @@ class BrowserSession:
                         continue
                     response = self.context.request.get(
                         DOWNLOAD_URL,
+                        headers=headers,
+                        max_redirects=0,
                         params={"fileId": remote_id, "groupId": group_id},
                         timeout=120_000,
                     )
@@ -508,15 +614,24 @@ class BrowserSession:
         destination_dir: Path,
         upload_dir: Path | None = None,
         allow_same_origin: bool = False,
+        cancelled: threading.Event | None = None,
     ) -> dict:
+        empty = {"downloaded": 0, "skipped": 0, "failed": 0}
+        if cancelled is not None and cancelled.is_set():
+            return empty
         if allow_same_origin:
             records = self.list_downloadable_files(
                 environment, allow_same_origin=True
             )
         else:
             records = self.list_downloadable_files(environment)
-        if not records:
-            return {"downloaded": 0, "skipped": 0, "failed": 0}
+        if not records or (cancelled is not None and cancelled.is_set()):
+            return empty
+        if cancelled is not None:
+            return self.download_files(
+                records, destination_dir, environment, upload_dir,
+                allow_same_origin=allow_same_origin, cancelled=cancelled,
+            )
         if allow_same_origin:
             return self.download_files(
                 records,
@@ -535,11 +650,14 @@ class BrowserSession:
             connection.close()
 
     def close(self):
-        if self.context is not None:
-            self.context.close()
-            self.context = None
-            self.page = None
-        if self.playwright is not None:
-            self.playwright.stop()
-            self.playwright = None
+        context, self.context = self.context, None
+        playwright, self.playwright = self.playwright, None
+        self.page = None
+        try:
+            if context is not None and not self.context_closed:
+                context.close()
+        finally:
+            self.context_closed = False
+            if playwright is not None:
+                playwright.stop()
 

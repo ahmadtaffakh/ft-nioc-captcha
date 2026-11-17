@@ -26,6 +26,7 @@ class AppSettings:
     epochs: int = 40
     minimum_confidence: float = 0.30
     login_attempts: int = 5
+    captcha_submit_delay_seconds: float = 1.0
     watch_dir: str = ""
     max_files_per_run: int = 10
     max_file_size_mb: float = 100.0
@@ -33,6 +34,7 @@ class AppSettings:
     environment: str = ""
     download_dir: str = ""
     auto_download_enabled: bool = False
+    thinclient_test_download: bool = False
     download_interval_seconds: int = 10
 
     def validate(self) -> None:
@@ -48,6 +50,8 @@ class AppSettings:
             raise ValueError("حداقل اطمینان باید بین صفر و یک باشد.")
         if not 1 <= self.login_attempts <= 20:
             raise ValueError("تعداد تلاش ورود باید بین ۱ و ۲۰ باشد.")
+        if not 0 <= self.captcha_submit_delay_seconds <= 60:
+            raise ValueError("تأخیر ارسال CAPTCHA باید بین صفر و ۶۰ ثانیه باشد.")
         if not 0 <= self.max_files_per_run <= 10000:
             raise ValueError("سقف تعداد فایل باید بین صفر و ۱۰۰۰۰ باشد.")
         if not 0 <= self.max_file_size_mb <= 100000:
@@ -56,6 +60,8 @@ class AppSettings:
             raise ValueError("وضعیت آپلود خودکار معتبر نیست.")
         if not isinstance(self.auto_download_enabled, bool):
             raise ValueError("وضعیت دانلود خودکار معتبر نیست.")
+        if not isinstance(self.thinclient_test_download, bool):
+            raise ValueError("وضعیت حالت تست دانلود معتبر نیست.")
         if not 5 <= self.download_interval_seconds <= 3600:
             raise ValueError("بازه دانلود خودکار باید بین ۵ و ۳۶۰۰ ثانیه باشد.")
         if self.environment not in {"", "thinclient", "intranet"}:

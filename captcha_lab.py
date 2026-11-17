@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import io
+import os
 import queue
 import sys
 import threading
 import time
+from dataclasses import fields
 from pathlib import Path
 
 import tkinter as tk
@@ -27,6 +29,7 @@ from ft_runtime import (
     DEFAULT_CAPTCHA_SELECTOR,
     RuntimeLog,
     RuntimeResult,
+    RuntimeStarted,
     capture_captcha_bytes,
 )
 from ft_settings import (
@@ -62,6 +65,26 @@ ENVIRONMENT_LABELS = {
     "intranet": "اینترانت",
 }
 ENVIRONMENT_CODES = {label: code for code, label in ENVIRONMENT_LABELS.items()}
+TASK_LABELS = {
+    "open": "بازکردن مرورگر",
+    "close": "بستن مرورگر",
+    "capture": "دریافت CAPTCHA",
+    "refresh": "تازه‌سازی صفحه",
+    "collect_batch": "دریافت گروهی CAPTCHA",
+    "manual_login": "بازکردن صفحه ورود",
+    "login": "ورود خودکار",
+    "upload_folder": "آپلود فایل‌ها",
+    "auto_upload_folder": "آپلود خودکار",
+    "list_downloadable_files": "بروزرسانی فهرست دانلود",
+    "download_files": "دانلود فایل‌های انتخابی",
+    "download_available_files": "دانلود فایل‌های مجاز",
+    "auto_download_files": "دانلود خودکار",
+    "upload_history": "خواندن سابقه آپلود",
+    "import_batch": "ورود نمونه‌ها",
+    "train": "آموزش مدل",
+    "predict": "پیش‌بینی CAPTCHA",
+    "predict_batch": "آزمون مدل روی نمونه‌ها",
+}
 
 
 def _existing_directory(value: str) -> Path | None:
@@ -139,15 +162,17 @@ class CaptchaLabApp:
         self.results = queue.Queue()
         self.callbacks = {}
         self.active_tasks = set()
+        self.queued_browser_tasks = set()
         self.browser = BrowserSession(self.base_dir / "browser-profile", self.results)
         self.current_image = None
         self.preview_reference = None
         self.closing = False
         self.upload_task_id = None
         self.download_task_id = None
-        self.auto_upload_suspended = False
+        self.auto_upload_suspended = True
         self.auto_upload_warning = None
-        self.auto_download_suspended = False
+        self.auto_download_suspended = True
+        self.download_cancelled = threading.Event()
         self.auto_download_warning = None
         self.startup_warnings = []
 
@@ -175,6 +200,7 @@ class CaptchaLabApp:
         self.epochs = tk.IntVar(value=settings.epochs)
         self.minimum_confidence = tk.DoubleVar(value=settings.minimum_confidence)
         self.login_attempts = tk.IntVar(value=settings.login_attempts)
+        self.captcha_submit_delay_seconds = tk.DoubleVar(value=settings.captcha_submit_delay_seconds)
         self.watch_dir = tk.StringVar(value=settings.watch_dir)
         self.max_files_per_run = tk.IntVar(value=settings.max_files_per_run)
         self.max_file_size_mb = tk.DoubleVar(value=settings.max_file_size_mb)
@@ -186,19 +212,29 @@ class CaptchaLabApp:
         self.auto_download_enabled = tk.BooleanVar(
             value=settings.auto_download_enabled
         )
-        self.thinclient_test_download = tk.BooleanVar(value=False)
+        self.thinclient_test_download = tk.BooleanVar(value=settings.thinclient_test_download)
         self.download_interval_seconds = tk.IntVar(
             value=settings.download_interval_seconds
         )
         self.remote_downloads = {}
         self.username = tk.StringVar(value=stored_username)
         self.password = tk.StringVar(value=stored_password)
-        self.remember_credentials = tk.BooleanVar(value=True)
+        self.credential_status = tk.StringVar(
+            value="اطلاعات ورود از ذخیرهٔ امن ویندوز بازیابی شد."
+            if stored_username else "اطلاعات ورود هنوز ذخیره نشده است."
+        )
         self.status = tk.StringVar(value="آماده")
         self.activity_status = tk.StringVar(value="آماده")
+        self.current_work = tk.StringVar(value="—")
         self.sample_count = tk.StringVar()
 
         self._build_ui()
+        self.settings_save_pending = None
+        for field in fields(AppSettings):
+            variable = getattr(self, "environment_label" if field.name == "environment" else field.name)
+            variable.trace_add("write", self._schedule_preferences_save)
+        if not self.startup_warnings:
+            self._save_preferences(announce=False)
         for warning in self.startup_warnings:
             self._log("warning", warning)
         if stored_username:
@@ -237,19 +273,23 @@ class CaptchaLabApp:
         ).pack(side="left", padx=(0, 12))
 
         self.notebook = ttk.Notebook(container)
-        self.notebook.pack(fill="both", expand=True)
+        self.login_tab = ttk.Frame(self.notebook, padding=16)
+        self.transfer_tab = ttk.Frame(self.notebook, padding=16)
         self.browser_tab = ttk.Frame(self.notebook, padding=16)
         self.data_tab = ttk.Frame(self.notebook, padding=16)
-        self.login_tab = ttk.Frame(self.notebook, padding=16)
-        self.upload_tab = ttk.Frame(self.notebook, padding=16)
-        self.download_tab = ttk.Frame(self.notebook, padding=16)
         self.output_tab = ttk.Frame(self.notebook, padding=16)
+        self.notebook.add(self.login_tab, text="  اطلاعات ورود  ")
+        self.notebook.add(self.transfer_tab, text="  آپلود و دانلود  ")
         self.notebook.add(self.browser_tab, text="  اتصال و CAPTCHA  ")
         self.notebook.add(self.data_tab, text="  داده و آموزش  ")
-        self.notebook.add(self.login_tab, text="  ورود سامانه  ")
-        self.notebook.add(self.upload_tab, text="  آپلود فایل  ")
-        self.notebook.add(self.download_tab, text="  دانلود فایل  ")
         self.notebook.add(self.output_tab, text="  خروجی و گزارش  ")
+        self.notebook.enable_traversal()
+        self.transfer_notebook = ttk.Notebook(self.transfer_tab)
+        self.transfer_notebook.pack(fill="both", expand=True)
+        self.upload_tab = ttk.Frame(self.transfer_notebook, padding=8)
+        self.download_tab = ttk.Frame(self.transfer_notebook, padding=8)
+        self.transfer_notebook.add(self.upload_tab, text="  آپلود فایل  ")
+        self.transfer_notebook.add(self.download_tab, text="  دانلود فایل  ")
 
         self._build_browser_tab()
         self._build_data_tab()
@@ -260,35 +300,30 @@ class CaptchaLabApp:
 
         status_bar = ttk.Frame(container, style="StatusBar.TFrame", padding=(10, 7))
         status_bar.pack(side="bottom", fill="x", pady=(10, 0))
+        self.notebook.pack(fill="both", expand=True)
+        status_bar.columnconfigure(1, weight=1)
         ttk.Label(
             status_bar, text="وضعیت اجرا:", style="StatusTitle.TLabel"
-        ).pack(side="right")
+        ).grid(row=0, column=2, sticky="e")
         ttk.Label(
             status_bar,
             textvariable=self.activity_status,
             style="Activity.TLabel",
-        ).pack(side="right", padx=(8, 4))
+        ).grid(row=0, column=1, sticky="e", padx=8)
         self.status_progress = ttk.Progressbar(
             status_bar, mode="indeterminate", length=80
         )
-        self.status_progress.pack(side="right", padx=(4, 14))
-        ttk.Separator(status_bar, orient="vertical").pack(
-            side="right", fill="y", padx=8
-        )
-        ttk.Label(
-            status_bar, text="آخرین وضعیت:", style="StatusTitle.TLabel"
-        ).pack(side="right")
-        ttk.Label(
-            status_bar,
-            textvariable=self.status,
-            style="Status.TLabel",
-            anchor="e",
-        ).pack(side="right", padx=8)
-        ttk.Label(
-            status_bar,
-            text=f"FT Desktop Console — {APP_VERSION}",
-            style="StatusMuted.TLabel",
-        ).pack(side="left")
+        self.status_progress.grid(row=0, column=0, sticky="w")
+        for row, title, value in (
+            (1, "کار جاری:", self.current_work),
+            (2, "آخرین پیام:", self.status),
+        ):
+            ttk.Label(status_bar, text=title, style="StatusTitle.TLabel").grid(
+                row=row, column=2, sticky="e", pady=(3, 0)
+            )
+            ttk.Label(status_bar, textvariable=value, style="Status.TLabel", anchor="e").grid(
+                row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=(3, 0)
+            )
 
     def _configure_styles(self):
         self.root.configure(background=COLORS["background"])
@@ -604,20 +639,6 @@ class CaptchaLabApp:
             row=0, column=1, columnspan=3, sticky="ew", padx=8, pady=8
         )
         add_tooltip(username_entry, "نام کاربری سامانه؛ پس از ورود خودکار موفق می‌تواند امن ذخیره شود.")
-        ttk.Label(login, text="حداقل اطمینان مدل", style="Card.TLabel").grid(
-            row=2, column=0, sticky="e", padx=8, pady=8
-        )
-        confidence_input = ttk.Spinbox(
-            login,
-            from_=0.0,
-            to=1.0,
-            increment=0.05,
-            textvariable=self.minimum_confidence,
-            width=10,
-            justify="center",
-        )
-        confidence_input.grid(row=2, column=1, sticky="w", padx=8, pady=8)
-        add_tooltip(confidence_input, "اگر اطمینان مدل کمتر از این مقدار باشد CAPTCHA Reload می‌شود.")
         ttk.Label(login, text="رمز عبور", style="Card.TLabel").grid(
             row=1, column=0, sticky="e", padx=8, pady=8
         )
@@ -627,7 +648,18 @@ class CaptchaLabApp:
         password_entry.grid(
             row=1, column=1, columnspan=3, sticky="ew", padx=8, pady=8
         )
+        for entry in (username_entry, password_entry):
+            entry.bind("<Return>", lambda _event: self._login())
         add_tooltip(password_entry, "رمز در Log نمایش داده نمی‌شود و با Windows DPAPI محافظت می‌شود.")
+        ttk.Label(login, text="حداقل اطمینان مدل", style="Card.TLabel").grid(
+            row=2, column=0, sticky="e", padx=8, pady=8
+        )
+        confidence_input = ttk.Spinbox(
+            login, from_=0.0, to=1.0, increment=0.05,
+            textvariable=self.minimum_confidence, width=10, justify="center",
+        )
+        confidence_input.grid(row=2, column=1, sticky="w", padx=8, pady=8)
+        add_tooltip(confidence_input, "حدس کم‌اطمینان در فیلد درج می‌شود و خودکار ارسال نمی‌شود.")
         ttk.Label(login, text="حداکثر تلاش ورود", style="Card.TLabel").grid(
             row=2, column=2, sticky="e", padx=8, pady=8
         )
@@ -644,13 +676,15 @@ class CaptchaLabApp:
             attempts_input,
             "حداکثر دفعات دریافت، تشخیص و ارسال CAPTCHA در ورود خودکار.",
         )
-        remember = ttk.Checkbutton(
-            login,
-            text="ذخیره امن پس از ورود موفق",
-            variable=self.remember_credentials,
+        ttk.Label(login, text="تأخیر ارسال CAPTCHA (ثانیه)", style="Card.TLabel").grid(
+            row=3, column=0, sticky="e", padx=8, pady=8
         )
-        remember.grid(row=3, column=0, columnspan=4, sticky="e", padx=8, pady=8)
-        add_tooltip(remember, "Credential فقط پس از تأیید ورود خودکار و برای همین حساب Windows ذخیره می‌شود.")
+        submit_delay = ttk.Spinbox(
+            login, from_=0, to=60, increment=1, width=10,
+            textvariable=self.captcha_submit_delay_seconds, justify="center",
+        )
+        submit_delay.grid(row=3, column=1, sticky="w", padx=8, pady=8)
+        add_tooltip(submit_delay, "فاصله بین درج حدس CAPTCHA و ارسال خودکار فرم؛ صفر تا ۶۰ ثانیه.")
         self.login_actions = ttk.Frame(login, style="Card.TFrame")
         self.login_actions.grid(
             row=4, column=0, columnspan=4, sticky="ew", pady=(10, 4)
@@ -663,9 +697,9 @@ class CaptchaLabApp:
         ).grid(row=0, column=0, padx=5, sticky="ew")
         self._button(
             self.login_actions,
-            "آزمون ورود خودکار",
+            "شروع",
             self._login,
-            "مدل CAPTCHA را اجرا می‌کند و تا سقف تنظیم‌شده برای ورود تلاش می‌کند.",
+            "با اطلاعات ورود وارد FT می‌شود و پایش‌های فعال انتقال را شروع می‌کند.",
             "Primary.TButton",
         ).grid(row=0, column=1, padx=5, sticky="ew")
         for column in range(2):
@@ -689,13 +723,20 @@ class CaptchaLabApp:
             "Credential رمزگذاری‌شده را حذف و فیلدهای ورود را خالی می‌کند.",
             "Danger.TButton",
         ).grid(row=0, column=1, padx=5, sticky="ew")
-        for column in range(2):
+        self._button(
+            self.login_settings_actions,
+            "ذخیره اطلاعات ورود",
+            self._save_entered_credentials,
+            "نام کاربری و رمز فعلی را فوراً با Windows DPAPI ذخیره می‌کند.",
+            "Primary.TButton",
+        ).grid(row=0, column=2, padx=5, sticky="ew")
+        for column in range(3):
             self.login_settings_actions.columnconfigure(
                 column, weight=1, uniform="login_settings_actions"
             )
         ttk.Label(
             login,
-            text="اطلاعات ورود با Windows DPAPI محافظت می‌شوند و در خروجی برنامه نوشته نمی‌شوند.",
+            textvariable=self.credential_status,
             style="MutedCard.TLabel",
             anchor="e",
         ).grid(row=6, column=0, columnspan=4, sticky="ew", padx=8, pady=(8, 2))
@@ -898,12 +939,21 @@ class CaptchaLabApp:
         )
         destination = ttk.Entry(card, textvariable=self.download_dir, justify="left")
         destination.grid(row=1, column=1, sticky="ew", padx=8, pady=8)
+        folder_actions = ttk.Frame(card, style="Card.TFrame")
+        folder_actions.grid(row=1, column=2, padx=6, pady=8, sticky="ew")
+        folder_actions.columnconfigure((0, 1), weight=1, uniform="download_folder")
         self._button(
-            card,
+            folder_actions,
             "انتخاب پوشه",
             self._choose_download_folder,
             "پوشه محلی دریافت فایل‌ها را انتخاب می‌کند.",
-        ).grid(row=1, column=2, padx=6, pady=8, sticky="ew")
+        ).grid(row=0, column=1, padx=(3, 0), sticky="ew")
+        self._button(
+            folder_actions,
+            "بازکردن پوشه",
+            self._open_download_folder,
+            "پوشه مقصد فعلی دانلود را در File Explorer باز می‌کند.",
+        ).grid(row=0, column=0, padx=(0, 3), sticky="ew")
         controls = ttk.Frame(card)
         controls.grid(row=3, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
         self._button(
@@ -950,12 +1000,24 @@ class CaptchaLabApp:
             controls,
             text="حالت تست: دانلود فایل آپلودشده همین تین‌کلاینت",
             variable=self.thinclient_test_download,
+            command=self._toggle_test_download,
         )
         test_download.pack(side="left", padx=4)
         add_tooltip(
             test_download,
-            "فقط برای تست روی تین‌کلاینت؛ فایل‌های دارای نشان همین محیط را نیز در فهرست نشان می‌دهد.",
+            "روی تین‌کلاینت دانلود خودکار را شروع می‌کند و فایل‌های دارای نشان تین‌کلاینت را هم می‌گیرد.",
         )
+        download_actions = ttk.Frame(card, style="Card.TFrame")
+        download_actions.grid(row=6, column=0, columnspan=3, sticky="e", padx=8, pady=(0, 6))
+        download_actions.columnconfigure((0, 1), weight=1, uniform="download_actions")
+        self._button(
+            download_actions, "شروع دانلود", self._start_auto_download,
+            "دانلود خودکار را آغاز یا از سر می‌گیرد.", "Primary.TButton",
+        ).grid(row=0, column=1, sticky="ew", padx=4)
+        self._button(
+            download_actions, "توقف دانلود", self._stop_auto_download,
+            "پایش خودکار را متوقف می‌کند. فایل در حال دریافت کامل می‌شود.", "Danger.TButton",
+        ).grid(row=0, column=0, sticky="ew", padx=4)
         self.download_tree = ttk.Treeview(
             card,
             columns=("name", "size", "origin"),
@@ -972,7 +1034,7 @@ class CaptchaLabApp:
         self.download_tree.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
         ttk.Label(
             card,
-            text="فایل بدون نشان منشأ یا فایل متعلق به همین محیط هرگز دانلود نمی‌شود.",
+            text="دانلود فایل‌های همین تین‌کلاینت فقط در حالت تست مجاز است. فایل باید نشان منشأ داشته باشد.",
             style="MutedCard.TLabel",
             anchor="e",
         ).grid(row=5, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
@@ -993,6 +1055,21 @@ class CaptchaLabApp:
             self.download_dir,
             "پوشه مقصد دانلود را انتخاب کنید",
         )
+
+    def _open_download_folder(self):
+        destination = _existing_directory(self.download_dir.get())
+        if destination is None:
+            message = "ابتدا پوشه مقصد معتبر انتخاب کنید."
+        else:
+            try:
+                os.startfile(destination.resolve())
+            except OSError as error:
+                message = f"بازکردن پوشه مقصد ناموفق بود: {error}"
+            else:
+                self._log("success", "پوشه مقصد دانلود باز شد.")
+                return
+        self._log("error", message)
+        messagebox.showerror("خطا", message)
 
     def _choose_folder(self, variable, title: str) -> bool:
         initial = _existing_directory(variable.get())
@@ -1057,6 +1134,7 @@ class CaptchaLabApp:
             return
         if self.download_task_id is not None:
             return
+        self.download_cancelled = threading.Event()
         self.download_task_id = self._submit(
             "download_files",
             self.browser.download_files,
@@ -1065,6 +1143,7 @@ class CaptchaLabApp:
             environment,
             Path(self.watch_dir.get()).expanduser() if self.watch_dir.get() else None,
             self._same_origin_download_enabled(),
+            self.download_cancelled,
             success=self._after_download,
         )
 
@@ -1090,10 +1169,31 @@ class CaptchaLabApp:
         state = "فعال" if self.auto_download_enabled.get() else "غیرفعال"
         self._log("info", f"دانلود خودکار {state} شد.")
 
+    def _toggle_test_download(self):
+        if self._same_origin_download_enabled():
+            self._log("info", "دانلود خودکار در حالت تست فعال شد.")
+            self._start_auto_download()
+
+    def _start_auto_download(self):
+        if not self._same_origin_download_enabled():
+            self.auto_download_enabled.set(True)
+        self.auto_download_suspended = False
+        self.auto_download_warning = None
+        self._download_available(automatic=True)
+
+    def _stop_auto_download(self):
+        self.auto_download_suspended = True
+        self.download_cancelled.set()
+        message = "پایش دانلود خودکار متوقف شد."
+        self.status.set(message)
+        self._log("info", message)
+
     def _auto_download_tick(self):
         if self.closing:
             return
-        if self.auto_download_enabled.get() and not self.auto_download_suspended:
+        if not self.auto_download_suspended and (
+            self.auto_download_enabled.get() or self._same_origin_download_enabled()
+        ):
             self._download_available(automatic=True)
         self.root.after(self._download_interval_ms(), self._auto_download_tick)
 
@@ -1117,12 +1217,15 @@ class CaptchaLabApp:
             return
         self.auto_download_warning = None
         self._save_preferences(announce=False)
+        self.download_cancelled = threading.Event()
         self.download_task_id = self._submit(
             "auto_download_files" if automatic else "download_available_files",
             self.browser.download_available_files,
             environment,
             destination,
             Path(self.watch_dir.get()).expanduser() if self.watch_dir.get() else None,
+            self._same_origin_download_enabled(),
+            self.download_cancelled,
             success=self._after_auto_download if automatic else self._after_download,
             announce=not automatic,
         )
@@ -1238,6 +1341,7 @@ class CaptchaLabApp:
                 epochs=self.epochs.get(),
                 minimum_confidence=self.minimum_confidence.get(),
                 login_attempts=self.login_attempts.get(),
+                captcha_submit_delay_seconds=self.captcha_submit_delay_seconds.get(),
                 watch_dir=self.watch_dir.get(),
                 max_files_per_run=self.max_files_per_run.get(),
                 max_file_size_mb=self.max_file_size_mb.get(),
@@ -1245,6 +1349,7 @@ class CaptchaLabApp:
                 environment=self._environment_code(),
                 download_dir=self.download_dir.get(),
                 auto_download_enabled=self.auto_download_enabled.get(),
+                thinclient_test_download=self.thinclient_test_download.get(),
                 download_interval_seconds=self.download_interval_seconds.get(),
             )
             settings.validate()
@@ -1265,6 +1370,15 @@ class CaptchaLabApp:
             self._log("success", "تنظیمات غیرحساس ذخیره شد.")
         return True
 
+    def _schedule_preferences_save(self, *_args):
+        if self.settings_save_pending is not None:
+            self.root.after_cancel(self.settings_save_pending)
+        self.settings_save_pending = self.root.after(350, self._save_changed_preferences)
+
+    def _save_changed_preferences(self):
+        self.settings_save_pending = None
+        self._save_preferences(announce=False)
+
     def _forget_credentials(self):
         if not messagebox.askyesno(
             "پاک کردن اطلاعات ورود",
@@ -1279,6 +1393,7 @@ class CaptchaLabApp:
             return
         self.username.set("")
         self.password.set("")
+        self.credential_status.set("اطلاعات ورود از ذخیرهٔ امن ویندوز پاک شد.")
         message = "اطلاعات ورود ذخیره‌شده پاک شد." if removed else "اطلاعات ورودی ذخیره نشده بود."
         self.status.set(message)
         self._log("warning" if removed else "info", message)
@@ -1289,6 +1404,7 @@ class CaptchaLabApp:
             self._log("info", f"شروع عملیات: {operation_name}")
         task_id = self.browser.submit(operation_name, operation, *args)
         self.callbacks[task_id] = success
+        self.queued_browser_tasks.add(task_id)
         self._mark_task_started(task_id)
         return task_id
 
@@ -1301,8 +1417,16 @@ class CaptchaLabApp:
     def _sync_activity_status(self):
         if not hasattr(self, "activity_status"):
             return
-        busy = bool(getattr(self, "active_tasks", ()))
+        active = getattr(self, "active_tasks", set())
+        queued = getattr(self, "queued_browser_tasks", set())
+        busy = bool(active)
         self.activity_status.set("در حال اجرا" if busy else "آماده")
+        if hasattr(self, "current_work"):
+            running = active - queued
+            labels = [TASK_LABELS.get(task.rsplit("-", 1)[0], task) for task in sorted(running)]
+            if queued:
+                labels.append(f"{len(queued)} کار در صف")
+            self.current_work.set("، ".join(labels) or "—")
         if not hasattr(self, "status_progress"):
             return
         if busy:
@@ -1483,9 +1607,12 @@ class CaptchaLabApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _login(self):
+        if any(task.startswith("login-") for task in self.active_tasks):
+            return
         try:
             minimum_confidence = self.minimum_confidence.get()
             login_attempts = self.login_attempts.get()
+            submit_delay = self.captcha_submit_delay_seconds.get()
         except tk.TclError:
             messagebox.showerror("خطا", "اطمینان و تعداد تلاش ورود باید عددی باشند.")
             return
@@ -1495,29 +1622,53 @@ class CaptchaLabApp:
         if not 1 <= login_attempts <= 20:
             messagebox.showerror("خطا", "تعداد تلاش ورود باید بین ۱ و ۲۰ باشد.")
             return
+        if not 0 <= submit_delay <= 60:
+            messagebox.showerror("خطا", "تأخیر ارسال CAPTCHA باید بین صفر و ۶۰ ثانیه باشد.")
+            return
         self._save_preferences(announce=False)
+        username, password = self.username.get(), self.password.get()
         self._submit(
             "login",
             self.browser.login,
-            self.username.get(),
-            self.password.get(),
+            username,
+            password,
             self.selector.get(),
             self.model_dir,
             minimum_confidence,
             login_attempts,
-            success=self._after_login,
+            submit_delay,
+            success=lambda message: self._after_start(message, username, password),
         )
 
-    def _after_login(self, message):
-        if not self.remember_credentials.get() or not message.startswith("ورود موفق"):
+    def _after_start(self, message, username, password):
+        self._after_login(message, username, password)
+        self.notebook.select(self.transfer_tab)
+        self.auto_upload_suspended = False
+        self.auto_download_suspended = False
+        if self.auto_upload_enabled.get():
+            self._upload_folder(automatic=True)
+        if self.auto_download_enabled.get() or self._same_origin_download_enabled():
+            self._download_available(automatic=True)
+
+    def _after_login(self, message, username, password):
+        if not message.startswith("ورود موفق"):
             return
+        self._store_credentials(username, password)
+
+    def _save_entered_credentials(self):
+        self._store_credentials(self.username.get(), self.password.get())
+
+    def _store_credentials(self, username, password) -> bool:
         try:
-            save_credentials(self.base_dir, self.username.get(), self.password.get())
+            save_credentials(self.base_dir, username, password)
         except (OSError, RuntimeError, ValueError) as error:
+            self.credential_status.set("ذخیرهٔ امن اطلاعات ورود ناموفق بود.")
             self._log("error", f"ذخیره امن اطلاعات ورود ناموفق بود: {error}")
             messagebox.showerror("خطا", str(error))
-            return
+            return False
+        self.credential_status.set("نام کاربری و رمز با Windows DPAPI ذخیره شدند.")
         self._log("success", "نام کاربری و رمز به‌صورت امن برای این حساب Windows ذخیره شد.")
+        return True
 
     def _poll_results(self):
         while True:
@@ -1528,12 +1679,17 @@ class CaptchaLabApp:
             if isinstance(result, RuntimeLog):
                 self._log(result.level, result.message)
                 continue
+            if isinstance(result, RuntimeStarted):
+                self.queued_browser_tasks.discard(result.task_id)
+                self._sync_activity_status()
+                continue
             task_id = result.task_id
             operation = result.operation
             succeeded = result.succeeded
             payload = result.payload
             callback = self.callbacks.pop(task_id, None)
             if hasattr(self, "active_tasks"):
+                self.queued_browser_tasks.discard(task_id)
                 self.active_tasks.discard(task_id)
                 self._sync_activity_status()
             if task_id == self.upload_task_id:
@@ -1633,7 +1789,7 @@ class CaptchaLabApp:
         self.browser.cancel_batch()
         self.status.set("در حال بستن مرورگر...")
         self._log("warning", "در حال بستن برنامه و مرورگر...")
-        self.browser.submit("close", self.browser.close)
+        self._submit("close", self.browser.close, announce=False)
 
 
 def main() -> None:
