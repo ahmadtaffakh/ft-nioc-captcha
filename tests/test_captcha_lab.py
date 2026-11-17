@@ -147,6 +147,60 @@ class BatchCaptureTest(unittest.TestCase):
             records, Path("downloads"), "intranet", Path("uploads")
         )
 
+    def test_refresh_downloads_enables_thinclient_loopback_only_when_selected(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.download_task_id = None
+        app.browser = Mock()
+        app._submit = Mock(return_value="download-1")
+        app._environment_code = Mock(return_value="thinclient")
+        app.thinclient_test_download = Mock()
+        app.thinclient_test_download.get.return_value = True
+
+        app._refresh_downloads()
+
+        app._submit.assert_called_once_with(
+            "list_downloadable_files",
+            app.browser.list_downloadable_files,
+            "thinclient",
+            15.0,
+            True,
+            success=app._display_download_files,
+        )
+
+    def test_download_folder_picker_falls_back_from_invalid_saved_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = CaptchaLabApp.__new__(CaptchaLabApp)
+            app.base_dir = Path(temporary)
+            app.download_dir = Mock()
+            app.download_dir.get.return_value = str(Path(temporary) / "missing")
+            app._save_preferences = Mock()
+
+            with patch("captcha_lab.filedialog.askdirectory", return_value="") as choose:
+                app._choose_download_folder()
+
+        choose.assert_called_once_with(
+            title="پوشه مقصد دانلود را انتخاب کنید",
+            initialdir=temporary,
+        )
+        app.download_dir.set.assert_not_called()
+
+    def test_empty_upload_folder_is_not_treated_as_current_directory(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.upload_task_id = None
+        app.watch_dir = Mock()
+        app.watch_dir.get.return_value = ""
+        app.max_files_per_run = Mock()
+        app.max_files_per_run.get.return_value = 10
+        app.max_file_size_mb = Mock()
+        app.max_file_size_mb.get.return_value = 100
+        app.browser = Mock()
+
+        with patch("captcha_lab.messagebox.showerror") as showerror:
+            app._upload_folder()
+
+        showerror.assert_called_once_with("خطا", "ابتدا یک پوشه معتبر انتخاب کنید.")
+        app.browser.upload_folder.assert_not_called()
+
     def test_collects_requested_images_and_refreshes_between_them(self):
         with tempfile.TemporaryDirectory() as temporary:
             session = BrowserSession(Path(temporary) / "profile", queue.Queue())
@@ -394,6 +448,61 @@ class BatchCaptureTest(unittest.TestCase):
         self.assertEqual([record["name"] for record in records], ["report.pdf"])
         self.assertEqual(result, {"downloaded": 1, "skipped": 0, "failed": 0})
         self.assertEqual(reverse, "downloaded")
+
+    def test_thinclient_loopback_downloads_its_own_uploaded_file_for_testing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            session = BrowserSession(base / "browser-profile", queue.Queue())
+            session.page = Mock()
+            session.context = Mock()
+            groups = Mock(ok=True, status=200)
+            groups.json.return_value = {
+                "isSuccess": True,
+                "data": [{"id": "group-1", "isDefault": True, "isDisabled": False}],
+            }
+            listing = Mock(ok=True, status=200)
+            listing.json.return_value = {
+                "isSuccess": True,
+                "data": {
+                    "totalCount": 1,
+                    "items": [
+                        {
+                            "id": "remote-1",
+                            "groupId": "group-1",
+                            "name": "__FT_TC__report",
+                            "extension": ".pdf",
+                            "size": 7,
+                            "directory": False,
+                        }
+                    ],
+                },
+            }
+            download = Mock(ok=True, status=200)
+            download.body.return_value = b"payload"
+            session.context.request.get.side_effect = [groups, download]
+            session.context.request.put.return_value = listing
+            destination = base / "downloads"
+            upload_dir = base / "uploads"
+            upload_dir.mkdir()
+            try:
+                with patch.object(session, "_ensure_file_manager"):
+                    records = session.list_downloadable_files(
+                        "thinclient", allow_same_origin=True
+                    )
+                    result = session.download_files(
+                        records,
+                        destination,
+                        "thinclient",
+                        upload_dir,
+                        allow_same_origin=True,
+                    )
+                    downloaded_content = (destination / "report.pdf").read_bytes()
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
+        self.assertEqual([record["name"] for record in records], ["report.pdf"])
+        self.assertEqual(result, {"downloaded": 1, "skipped": 0, "failed": 0})
+        self.assertEqual(downloaded_content, b"payload")
 
 
 class CredentialPersistenceTest(unittest.TestCase):

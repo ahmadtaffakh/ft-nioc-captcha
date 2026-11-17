@@ -355,9 +355,15 @@ class BrowserSession:
         return str(selected["id"])
 
     def list_downloadable_files(
-        self, environment: str, login_timeout_minutes: float = 15.0
+        self,
+        environment: str,
+        login_timeout_minutes: float = 15.0,
+        allow_same_origin: bool = False,
     ) -> list[dict]:
         expected_origin = opposite_environment(environment)
+        allowed_origins = {expected_origin}
+        if allow_same_origin and environment == "thinclient":
+            allowed_origins.add(environment)
         self._ensure_file_manager(login_timeout_minutes)
         group_id = self._default_group_id()
         page_size = 100
@@ -386,7 +392,7 @@ class BrowserSession:
                     continue
                 remote_name = f"{item.get('name') or ''}{item.get('extension') or ''}"
                 parsed = parse_transfer_name(remote_name)
-                if not parsed or parsed[0] != expected_origin:
+                if not parsed or parsed[0] not in allowed_origins:
                     continue
                 remote_id = item.get("id")
                 item_group_id = item.get("groupId") or group_id
@@ -423,8 +429,12 @@ class BrowserSession:
         destination_dir: Path,
         environment: str,
         upload_dir: Path | None = None,
+        allow_same_origin: bool = False,
     ) -> dict:
         expected_origin = opposite_environment(environment)
+        allowed_origins = {expected_origin}
+        if allow_same_origin and environment == "thinclient":
+            allowed_origins.add(environment)
         destination_dir = Path(destination_dir).resolve()
         destination_dir.mkdir(parents=True, exist_ok=True)
         if upload_dir and Path(upload_dir).resolve() == destination_dir:
@@ -436,7 +446,7 @@ class BrowserSession:
             for record in records:
                 try:
                     parsed = parse_transfer_name(str(record.get("remote_name") or ""))
-                    if not parsed or parsed[0] != expected_origin:
+                    if not parsed or parsed[0] not in allowed_origins:
                         raise ValueError("منشأ فایل با محیط مقابل تطابق ندارد.")
                     if parsed[1] != record.get("name"):
                         raise ValueError("نام فایل دانلودی معتبر نیست.")
@@ -481,7 +491,7 @@ class BrowserSession:
                         remote_id,
                         file_hash,
                         destination,
-                        expected_origin,
+                        parsed[0],
                     )
                     downloaded += 1
                     self._emit("success", f"دانلود شد: {destination.name}")
@@ -497,10 +507,24 @@ class BrowserSession:
         environment: str,
         destination_dir: Path,
         upload_dir: Path | None = None,
+        allow_same_origin: bool = False,
     ) -> dict:
-        records = self.list_downloadable_files(environment)
+        if allow_same_origin:
+            records = self.list_downloadable_files(
+                environment, allow_same_origin=True
+            )
+        else:
+            records = self.list_downloadable_files(environment)
         if not records:
             return {"downloaded": 0, "skipped": 0, "failed": 0}
+        if allow_same_origin:
+            return self.download_files(
+                records,
+                destination_dir,
+                environment,
+                upload_dir,
+                allow_same_origin=True,
+            )
         return self.download_files(records, destination_dir, environment, upload_dir)
 
     def upload_history(self):

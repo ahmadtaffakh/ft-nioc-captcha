@@ -64,6 +64,16 @@ ENVIRONMENT_LABELS = {
 ENVIRONMENT_CODES = {label: code for code, label in ENVIRONMENT_LABELS.items()}
 
 
+def _existing_directory(value: str) -> Path | None:
+    if not value.strip():
+        return None
+    try:
+        path = Path(value).expanduser()
+        return path if path.is_dir() else None
+    except OSError:
+        return None
+
+
 def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
     """Attach a keyboard- and mouse-accessible tooltip to one Tk widget."""
     tooltip = None
@@ -176,6 +186,7 @@ class CaptchaLabApp:
         self.auto_download_enabled = tk.BooleanVar(
             value=settings.auto_download_enabled
         )
+        self.thinclient_test_download = tk.BooleanVar(value=False)
         self.download_interval_seconds = tk.IntVar(
             value=settings.download_interval_seconds
         )
@@ -935,6 +946,16 @@ class CaptchaLabApp:
             "فایل‌های انتخابی را بدون بازنویسی فایل موجود دانلود می‌کند.",
             "Primary.TButton",
         ).pack(side="right", padx=4)
+        test_download = ttk.Checkbutton(
+            controls,
+            text="حالت تست: دانلود فایل آپلودشده همین تین‌کلاینت",
+            variable=self.thinclient_test_download,
+        )
+        test_download.pack(side="left", padx=4)
+        add_tooltip(
+            test_download,
+            "فقط برای تست روی تین‌کلاینت؛ فایل‌های دارای نشان همین محیط را نیز در فهرست نشان می‌دهد.",
+        )
         self.download_tree = ttk.Treeview(
             card,
             columns=("name", "size", "origin"),
@@ -961,14 +982,32 @@ class CaptchaLabApp:
     def _environment_code(self) -> str:
         return ENVIRONMENT_CODES.get(self.environment_label.get(), "")
 
-    def _choose_download_folder(self):
-        selected = filedialog.askdirectory(
-            title="پوشه مقصد دانلود را انتخاب کنید",
-            initialdir=self.download_dir.get() or str(self.base_dir),
+    def _same_origin_download_enabled(self) -> bool:
+        return (
+            self._environment_code() == "thinclient"
+            and self.thinclient_test_download.get()
         )
-        if selected:
-            self.download_dir.set(selected)
-            self._save_preferences(announce=False)
+
+    def _choose_download_folder(self):
+        self._choose_folder(
+            self.download_dir,
+            "پوشه مقصد دانلود را انتخاب کنید",
+        )
+
+    def _choose_folder(self, variable, title: str) -> bool:
+        initial = _existing_directory(variable.get())
+        if initial is None:
+            initial = _existing_directory(str(self.base_dir)) or Path.home()
+        try:
+            selected = filedialog.askdirectory(title=title, initialdir=str(initial))
+        except tk.TclError as error:
+            messagebox.showerror("خطا", f"باز کردن پنجره انتخاب پوشه ناموفق بود: {error}")
+            return False
+        if not selected:
+            return False
+        variable.set(selected)
+        self._save_preferences(announce=False)
+        return True
 
     def _refresh_downloads(self):
         environment = self._environment_code()
@@ -977,10 +1016,13 @@ class CaptchaLabApp:
             return
         if self.download_task_id is not None:
             return
+        arguments = (environment,)
+        if self._same_origin_download_enabled():
+            arguments = (environment, 15.0, True)
         self.download_task_id = self._submit(
             "list_downloadable_files",
             self.browser.list_downloadable_files,
-            environment,
+            *arguments,
             success=self._display_download_files,
         )
 
@@ -1001,8 +1043,8 @@ class CaptchaLabApp:
         if not environment:
             messagebox.showerror("خطا", "ابتدا محیط اجرا را مشخص کنید.")
             return
-        destination = Path(self.download_dir.get()).expanduser()
-        if not destination.is_dir():
+        destination = _existing_directory(self.download_dir.get())
+        if destination is None:
             messagebox.showerror("خطا", "ابتدا پوشه مقصد معتبر انتخاب کنید.")
             return
         selected = [
@@ -1022,6 +1064,7 @@ class CaptchaLabApp:
             destination,
             environment,
             Path(self.watch_dir.get()).expanduser() if self.watch_dir.get() else None,
+            self._same_origin_download_enabled(),
             success=self._after_download,
         )
 
@@ -1058,11 +1101,11 @@ class CaptchaLabApp:
         if self.download_task_id is not None:
             return
         environment = self._environment_code()
-        destination = Path(self.download_dir.get()).expanduser()
+        destination = _existing_directory(self.download_dir.get())
         warning = None
         if not environment:
             warning = "ابتدا محیط اجرا را مشخص کنید."
-        elif not destination.is_dir():
+        elif destination is None:
             warning = "ابتدا پوشه مقصد معتبر انتخاب کنید."
         if warning:
             if automatic:
@@ -1095,14 +1138,11 @@ class CaptchaLabApp:
         self._log("success" if not result["failed"] else "warning", message)
 
     def _choose_upload_folder(self):
-        selected = filedialog.askdirectory(
-            title="پوشه فایل‌های قابل آپلود را انتخاب کنید",
-            initialdir=self.watch_dir.get() or str(self.base_dir),
-        )
-        if selected:
-            self.watch_dir.set(selected)
+        if self._choose_folder(
+            self.watch_dir,
+            "پوشه فایل‌های قابل آپلود را انتخاب کنید",
+        ):
             self.auto_upload_warning = None
-            self._save_preferences(announce=False)
 
     def _toggle_auto_upload(self):
         self.auto_upload_suspended = False
@@ -1124,14 +1164,14 @@ class CaptchaLabApp:
                 self._log("info", "یک عملیات آپلود در حال اجرا است؛ درخواست تکراری نادیده گرفته شد.")
             return
         try:
-            folder = Path(self.watch_dir.get()).expanduser()
+            folder = _existing_directory(self.watch_dir.get())
             max_files = self.max_files_per_run.get()
             max_size = self.max_file_size_mb.get()
         except tk.TclError:
             if not automatic:
                 messagebox.showerror("خطا", "محدودیت تعداد و حجم باید عددی باشند.")
             return
-        if not folder.is_dir():
+        if folder is None:
             if automatic:
                 warning = str(folder)
                 if self.auto_upload_warning != warning:
