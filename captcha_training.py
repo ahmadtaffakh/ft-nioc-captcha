@@ -13,6 +13,8 @@ import time
 import uuid
 from pathlib import Path
 
+from captcha_inference import MODEL_FILENAME, write_model_file
+
 
 PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
 ARABIC_DIGITS = "٠١٢٣٤٥٦٧٨٩"
@@ -383,31 +385,59 @@ def train_model(
     model_path = model_dir / "captcha_model.keras"
     metadata_path = model_dir / "captcha_model.json"
     temporary_model = model_dir / "captcha_model.tmp.keras"
+    lightweight_path = model_dir / MODEL_FILENAME
     temporary_metadata = model_dir / "captcha_model.tmp.json"
+    temporary_lightweight = model_dir / f"{MODEL_FILENAME}.training"
     model.save(temporary_model)
+    metadata = {
+        "sequence_length": sequence_length,
+        "width": MODEL_WIDTH,
+        "height": MODEL_HEIGHT,
+        "channels": MODEL_CHANNELS,
+        "validation_samples": validation_size,
+        "exact_match": exact_match,
+    }
     temporary_metadata.write_text(
-        json.dumps(
-            {
-                "sequence_length": sequence_length,
-                "width": MODEL_WIDTH,
-                "height": MODEL_HEIGHT,
-                "channels": MODEL_CHANNELS,
-                "validation_samples": validation_size,
-                "exact_match": exact_match,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    _export_model_weights(model, metadata, temporary_lightweight)
     os.replace(temporary_model, model_path)
     os.replace(temporary_metadata, metadata_path)
+    os.replace(temporary_lightweight, lightweight_path)
     return {
         "model_path": str(model_path),
         "samples": len(samples),
         "epochs": len(history.history["loss"]),
         "exact_match": exact_match,
     }
+
+
+def _export_model_weights(model, metadata: dict, destination: Path) -> Path:
+    classifier = model.get_layer("shared_digit_classifier").layer
+    kernel, bias = classifier.layers[-1].get_weights()
+    kernel_bytes = kernel.astype("<f4", copy=False).tobytes(order="C")
+    bias_bytes = bias.astype("<f4", copy=False).tobytes(order="C")
+    return write_model_file(destination, metadata, kernel_bytes, bias_bytes)
+
+
+def export_lightweight_model(model_dir: Path, destination: Path | None = None) -> Path:
+    """Export an existing Keras model for the TensorFlow-free office build."""
+    model_dir = Path(model_dir)
+    _np, _Image, tf = _import_ml_dependencies()
+    try:
+        metadata = json.loads(
+            (model_dir / "captcha_model.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("Metadata مدل CAPTCHA معتبر نیست.") from error
+    if not isinstance(metadata, dict):
+        raise ValueError("Metadata مدل CAPTCHA معتبر نیست.")
+    model = tf.keras.models.load_model(model_dir / "captcha_model.keras")
+    return _export_model_weights(
+        model,
+        metadata,
+        Path(destination) if destination else model_dir / MODEL_FILENAME,
+    )
 
 
 def load_model(model_dir: Path):

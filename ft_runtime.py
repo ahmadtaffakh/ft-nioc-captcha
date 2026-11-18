@@ -13,12 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from captcha_training import (
-    decode_image_data_url,
-    load_model,
-    predict_image,
-    save_unlabeled_batch_sample,
-)
+from captcha_inference import load_model, predict_image
+from captcha_training import decode_image_data_url, save_unlabeled_batch_sample
 from ft_auto_uploader import (
     FILE_MANAGER_URL,
     downloaded_fingerprint_exists,

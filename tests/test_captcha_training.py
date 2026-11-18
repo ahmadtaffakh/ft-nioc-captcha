@@ -1,11 +1,14 @@
 import base64
 import csv
+import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from captcha_training import (
+    _export_model_weights,
+    _import_ml_dependencies,
     _split_samples_by_image,
     build_model,
     decode_image_data_url,
@@ -17,6 +20,8 @@ from captcha_training import (
     save_labeled_sample,
     validate_dataset,
 )
+from captcha_inference import load_model as load_lightweight_model
+from captcha_inference import predict_image as predict_lightweight_image
 
 
 class ModelArchitectureTest(unittest.TestCase):
@@ -34,6 +39,50 @@ class ModelArchitectureTest(unittest.TestCase):
             (None, 4, 10),
         )
         self.assertLess(model.count_params(), 70_000)
+
+    def test_lightweight_export_matches_keras_prediction(self):
+        np, Image, _tf = _import_ml_dependencies()
+        model = build_model(sequence_length=4)
+        classifier = model.get_layer("shared_digit_classifier").layer
+        dense = classifier.layers[-1]
+        kernel, bias = dense.get_weights()
+        kernel[:] = (
+            np.arange(kernel.size, dtype="float32").reshape(kernel.shape) % 17 - 8
+        ) / 1000.0
+        bias[:] = np.arange(10, dtype="float32") / 100.0
+        dense.set_weights([kernel, bias])
+        image = Image.new("RGB", (160, 50))
+        pixels = image.load()
+        for y in range(50):
+            for x in range(160):
+                pixels[x, y] = ((x * 3) % 256, (y * 5) % 256, (x + y) % 256)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_bytes = buffer.getvalue()
+        expected_probabilities = model.predict(
+            np.asarray(image, dtype="float32")[np.newaxis, ...] / 255.0,
+            verbose=0,
+        )[0]
+        expected_text = "".join(
+            str(int(index)) for index in np.argmax(expected_probabilities, axis=-1)
+        )
+        expected_confidence = float(
+            np.min(np.max(expected_probabilities, axis=-1))
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            model_dir = Path(temporary)
+            _export_model_weights(
+                model,
+                {"sequence_length": 4},
+                model_dir / "captcha_model.ftmodel",
+            )
+            actual_text, actual_confidence = predict_lightweight_image(
+                image_bytes, load_lightweight_model(model_dir)
+            )
+
+        self.assertEqual(actual_text, expected_text)
+        self.assertAlmostEqual(actual_confidence, expected_confidence, places=5)
 
 
 class DigitNormalizationTest(unittest.TestCase):
