@@ -23,7 +23,7 @@ def launch_persistent_session(playwright, profile_dir: Path):
     elif os.name == "nt" and not Path(chromium.executable_path).is_file():
         # Office builds use an installed browser instead of shipping Chromium.
         last_error = None
-        for channel in ("msedge", "chrome"):
+        for channel in ("chrome", "msedge"):
             try:
                 context = chromium.launch_persistent_context(
                     str(profile_dir), headless=False, channel=channel

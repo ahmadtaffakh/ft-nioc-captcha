@@ -51,7 +51,7 @@ class PersistentSessionTest(unittest.TestCase):
         self.assertIs(actual_page, context.new_page.return_value)
         context.new_page.assert_called_once_with()
 
-    def test_uses_installed_edge_when_windows_chromium_is_missing(self):
+    def test_uses_installed_chrome_when_windows_chromium_is_missing(self):
         playwright = Mock()
         chromium = playwright.chromium
         context = chromium.launch_persistent_context.return_value
@@ -65,17 +65,17 @@ class PersistentSessionTest(unittest.TestCase):
                 result = launch_persistent_session(playwright, profile_dir)
 
         chromium.launch_persistent_context.assert_called_once_with(
-            str(profile_dir), headless=False, channel="msedge"
+            str(profile_dir), headless=False, channel="chrome"
         )
         self.assertEqual(result, (context, page))
 
-    def test_falls_back_to_installed_chrome_when_edge_launch_fails(self):
+    def test_falls_back_to_installed_edge_when_chrome_launch_fails(self):
         playwright = Mock()
         chromium = playwright.chromium
         context = Mock()
         context.pages = [Mock()]
         chromium.launch_persistent_context.side_effect = [
-            RuntimeError("Edge unavailable"),
+            RuntimeError("Chrome unavailable"),
             context,
         ]
 
@@ -89,10 +89,10 @@ class PersistentSessionTest(unittest.TestCase):
             chromium.launch_persistent_context.call_args_list,
             [
                 unittest.mock.call(
-                    str(profile_dir), headless=False, channel="msedge"
+                    str(profile_dir), headless=False, channel="chrome"
                 ),
                 unittest.mock.call(
-                    str(profile_dir), headless=False, channel="chrome"
+                    str(profile_dir), headless=False, channel="msedge"
                 ),
             ],
         )
