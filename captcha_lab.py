@@ -150,9 +150,11 @@ def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
 
 
 class CaptchaLabApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, *, office_mode: bool = False):
         self.root = root
-        self.root.title(f"آزمایشگاه CAPTCHA سامانه FT — نسخه {APP_VERSION}")
+        self.office_mode = office_mode
+        title = "FT Office" if office_mode else "آزمایشگاه CAPTCHA سامانه FT"
+        self.root.title(f"{title} — نسخه {APP_VERSION}")
         self.root.geometry("980x720")
         self.root.minsize(860, 640)
         self.base_dir = app_data_dir()
@@ -257,13 +259,21 @@ class CaptchaLabApp:
         title_group.pack(side="right", fill="x", expand=True)
         ttk.Label(
             title_group,
-            text="سامانه سازمانی مدیریت CAPTCHA و انتقال فایل FT",
+            text=(
+                "سامانه اداری انتقال فایل FT"
+                if self.office_mode
+                else "سامانه سازمانی مدیریت CAPTCHA و انتقال فایل FT"
+            ),
             style="HeaderTitle.TLabel",
             anchor="e",
         ).pack(fill="x")
         ttk.Label(
             title_group,
-            text="محیط کنترل، آموزش و آزمون ورود به سامانه",
+            text=(
+                "ورود خودکار، آپلود و دانلود فایل"
+                if self.office_mode
+                else "محیط کنترل، آموزش و آزمون ورود به سامانه"
+            ),
             style="HeaderSubtitle.TLabel",
             anchor="e",
         ).pack(fill="x", pady=(3, 0))
@@ -281,8 +291,9 @@ class CaptchaLabApp:
         self.output_tab = ttk.Frame(self.notebook, padding=16)
         self.notebook.add(self.login_tab, text="  اطلاعات ورود  ")
         self.notebook.add(self.transfer_tab, text="  آپلود و دانلود  ")
-        self.notebook.add(self.browser_tab, text="  اتصال و CAPTCHA  ")
-        self.notebook.add(self.data_tab, text="  داده و آموزش  ")
+        if not self.office_mode:
+            self.notebook.add(self.browser_tab, text="  اتصال و CAPTCHA  ")
+            self.notebook.add(self.data_tab, text="  داده و آموزش  ")
         self.notebook.add(self.output_tab, text="  خروجی و گزارش  ")
         self.notebook.enable_traversal()
         self.transfer_notebook = ttk.Notebook(self.transfer_tab)
@@ -292,8 +303,9 @@ class CaptchaLabApp:
         self.transfer_notebook.add(self.upload_tab, text="  آپلود فایل  ")
         self.transfer_notebook.add(self.download_tab, text="  دانلود فایل  ")
 
-        self._build_browser_tab()
-        self._build_data_tab()
+        if not self.office_mode:
+            self._build_browser_tab()
+            self._build_data_tab()
         self._build_login_tab()
         self._build_upload_tab()
         self._build_download_tab()
@@ -686,6 +698,16 @@ class CaptchaLabApp:
         )
         submit_delay.grid(row=3, column=1, sticky="w", padx=8, pady=8)
         add_tooltip(submit_delay, "فاصله بین درج حدس CAPTCHA و ارسال خودکار فرم؛ صفر تا ۶۰ ثانیه.")
+        if self.office_mode:
+            for child in login.grid_slaves():
+                if int(child.grid_info()["row"]) in {2, 3}:
+                    child.grid_remove()
+            ttk.Label(
+                login,
+                text="تنظیمات پیش‌فرض ورود خودکار برای استفاده اداری اعمال می‌شود.",
+                style="MutedCard.TLabel",
+                anchor="e",
+            ).grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=8)
         self.login_actions = ttk.Frame(login, style="Card.TFrame")
         self.login_actions.grid(
             row=4, column=0, columnspan=4, sticky="ew", pady=(10, 4)

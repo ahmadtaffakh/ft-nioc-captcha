@@ -51,7 +51,7 @@ class PersistentSessionTest(unittest.TestCase):
         self.assertIs(actual_page, context.new_page.return_value)
         context.new_page.assert_called_once_with()
 
-    def test_uses_installed_chrome_when_windows_chromium_is_missing(self):
+    def test_uses_installed_edge_when_windows_chromium_is_missing(self):
         playwright = Mock()
         chromium = playwright.chromium
         context = chromium.launch_persistent_context.return_value
@@ -65,9 +65,38 @@ class PersistentSessionTest(unittest.TestCase):
                 result = launch_persistent_session(playwright, profile_dir)
 
         chromium.launch_persistent_context.assert_called_once_with(
-            str(profile_dir), headless=False, channel="chrome"
+            str(profile_dir), headless=False, channel="msedge"
         )
         self.assertEqual(result, (context, page))
+
+    def test_falls_back_to_installed_chrome_when_edge_launch_fails(self):
+        playwright = Mock()
+        chromium = playwright.chromium
+        context = Mock()
+        context.pages = [Mock()]
+        chromium.launch_persistent_context.side_effect = [
+            RuntimeError("Edge unavailable"),
+            context,
+        ]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            profile_dir = Path(temporary) / "browser-profile"
+            chromium.executable_path = str(Path(temporary) / "missing-chromium")
+            with patch("ft_browser.os", SimpleNamespace(name="nt")):
+                result = launch_persistent_session(playwright, profile_dir)
+
+        self.assertEqual(
+            chromium.launch_persistent_context.call_args_list,
+            [
+                unittest.mock.call(
+                    str(profile_dir), headless=False, channel="msedge"
+                ),
+                unittest.mock.call(
+                    str(profile_dir), headless=False, channel="chrome"
+                ),
+            ],
+        )
+        self.assertEqual(result, (context, context.pages[0]))
 
 
 if __name__ == "__main__":

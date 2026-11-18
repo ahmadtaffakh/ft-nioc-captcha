@@ -13,7 +13,32 @@ from tkinter import ttk
 from captcha_lab import AUTO_UPLOAD_INTERVAL_MS, CaptchaLabApp
 from ft_auto_uploader import open_state, process_file
 from ft_runtime import BrowserSession, RuntimeResult, capture_captcha_bytes
+from ft_runtime import load_model as load_runtime_model
 from ft_settings import load_settings
+
+
+class LoginModelCompatibilityTest(unittest.TestCase):
+    def test_prefers_lightweight_model(self):
+        lightweight = object()
+        with (
+            patch("ft_runtime.load_lightweight_model", return_value=lightweight),
+            patch("ft_runtime.load_keras_model") as keras,
+        ):
+            result = load_runtime_model(Path("model"))
+
+        self.assertEqual(result, ("lightweight", lightweight))
+        keras.assert_not_called()
+
+    def test_falls_back_to_existing_keras_model(self):
+        keras_model = object()
+        with (
+            patch("ft_runtime.load_lightweight_model", side_effect=FileNotFoundError),
+            patch("ft_runtime.load_keras_model", return_value=keras_model) as keras,
+        ):
+            result = load_runtime_model(Path("model"))
+
+        self.assertEqual(result, ("keras", keras_model))
+        keras.assert_called_once_with(Path("model"))
 
 
 class CaptchaCaptureTest(unittest.TestCase):
@@ -872,6 +897,30 @@ class OrganizationalUiTest(unittest.TestCase):
     def test_log_uses_professional_dark_palette(self):
         self.assertEqual(self.app.output.cget("background"), "#111827")
         self.assertEqual(self.app.output.tag_cget("success", "foreground"), "#6CE9A6")
+
+
+class OfficeUiTest(unittest.TestCase):
+    def test_office_mode_hides_training_and_captcha_tabs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tk.Tk()
+            root.withdraw()
+            with patch("captcha_lab.app_data_dir", return_value=Path(temporary)):
+                office = CaptchaLabApp(root, office_mode=True)
+            try:
+                names = [
+                    office.notebook.tab(tab, "text").strip()
+                    for tab in office.notebook.tabs()
+                ]
+                self.assertEqual(
+                    names,
+                    ["اطلاعات ورود", "آپلود و دانلود", "خروجی و گزارش"],
+                )
+                self.assertIn("FT Office", root.title())
+            finally:
+                office.browser.executor.shutdown(wait=False, cancel_futures=True)
+                for callback in root.tk.splitlist(root.tk.call("after", "info")):
+                    root.after_cancel(callback)
+                root.destroy()
 
 
 if __name__ == "__main__":

@@ -21,10 +21,20 @@ def launch_persistent_session(playwright, profile_dir: Path):
             str(profile_dir), headless=False, executable_path=str(bundled_chrome)
         )
     elif os.name == "nt" and not Path(chromium.executable_path).is_file():
-        # Use Playwright's supported Chrome channel when the browser download is absent.
-        context = chromium.launch_persistent_context(
-            str(profile_dir), headless=False, channel="chrome"
-        )
+        # Office builds use an installed browser instead of shipping Chromium.
+        last_error = None
+        for channel in ("msedge", "chrome"):
+            try:
+                context = chromium.launch_persistent_context(
+                    str(profile_dir), headless=False, channel=channel
+                )
+                break
+            except Exception as error:
+                last_error = error
+        else:
+            raise RuntimeError(
+                "Microsoft Edge یا Google Chrome نصب‌شده پیدا نشد."
+            ) from last_error
     else:
         context = chromium.launch_persistent_context(str(profile_dir), headless=False)
     page = context.pages[0] if context.pages else context.new_page()

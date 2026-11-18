@@ -2,6 +2,21 @@
 
 نسخه فعلی رابط: `0.7.0`
 
+## نسخه اداری سبک
+
+خروجی `FT-Office-Lite.zip` فقط ورود خودکار و انتقال فایل را ارائه می‌کند.
+این خروجی از مدل سبک و Edge یا Chrome نصب‌شده استفاده می‌کند و TensorFlow،
+Keras، NumPy و Chromium پرتابل را همراه ندارد. راهنمای کاربران این نسخه در
+`README-OFFICE.md` قرار دارد. برای ساخت:
+
+```powershell
+pip install -r requirements-office-build.txt
+powershell -ExecutionPolicy Bypass -File tools\build_office.ps1
+```
+
+آموزش جدید علاوه بر مدل Keras، فایل `captcha_model.ftmodel` لازم برای نسخه
+اداری را نیز تولید می‌کند.
+
 ابزار `captcha_lab.py` یک رابط محلی برای دریافت CAPTCHA در شبکه شرکت،
 برچسب‌گذاری، آموزش مدل RGB ثابت‌طول و آزمون ورود است. نام کاربری و رمز عبور در
 فایل یا دیتابیس ذخیره نمی‌شوند.

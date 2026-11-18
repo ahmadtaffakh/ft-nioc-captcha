@@ -13,8 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from captcha_inference import load_model, predict_image
-from captcha_training import decode_image_data_url, save_unlabeled_batch_sample
+from captcha_inference import (
+    load_model as load_lightweight_model,
+    predict_image as predict_lightweight_image,
+)
+from captcha_training import (
+    decode_image_data_url,
+    load_model as load_keras_model,
+    predict_image as predict_keras_image,
+    save_unlabeled_batch_sample,
+)
 from ft_auto_uploader import (
     FILE_MANAGER_URL,
     downloaded_fingerprint_exists,
@@ -44,6 +52,23 @@ FILE_MANAGER_API = "https://ft.nioc.ir/webapi/api/v1/"
 GROUPS_URL = FILE_MANAGER_API + "Group/GetAllUserGroups"
 FILES_URL = FILE_MANAGER_API + "File/GetFilesAndFolders"
 DOWNLOAD_URL = FILE_MANAGER_API + "File/DownloadFile"
+
+
+def load_model(model_dir: Path):
+    """Prefer the office model while preserving existing Keras installations."""
+    try:
+        return "lightweight", load_lightweight_model(model_dir)
+    except FileNotFoundError:
+        return "keras", load_keras_model(model_dir)
+
+
+def predict_image(image_bytes: bytes, model_bundle) -> tuple[str, float]:
+    model_type, bundle = model_bundle
+    if model_type == "lightweight":
+        return predict_lightweight_image(image_bytes, bundle)
+    if model_type == "keras":
+        return predict_keras_image(image_bytes, bundle)
+    raise RuntimeError("نوع مدل CAPTCHA پشتیبانی نمی‌شود.")
 
 
 @dataclass(frozen=True)
