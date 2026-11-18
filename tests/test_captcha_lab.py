@@ -44,6 +44,35 @@ class CaptchaCaptureTest(unittest.TestCase):
 
 
 class BatchCaptureTest(unittest.TestCase):
+    def test_failed_automatic_login_waits_for_manual_login(self):
+        session = BrowserSession(Path("profile"), queue.Queue())
+        session.login = Mock(side_effect=RuntimeError("login failed"))
+        session._open_page = Mock()
+        session._ensure_file_manager = Mock()
+        with session.executor:
+            result = session.start_session("user", "password", "img", Path("model"), 0.3, 5)
+        self.assertEqual(result, "ورود دستی تکمیل شد.")
+        session._ensure_file_manager.assert_called_once_with(automatic_login=False)
+
+    def test_expired_session_reauthenticates_before_continuing(self):
+        from ft_settings import AppSettings
+        session = BrowserSession(Path("profile") / "browser-profile", queue.Queue())
+        session.page = Mock()
+        session.page.is_closed.return_value = False
+        session.login = Mock(return_value="ورود موفق")
+        button = Mock()
+        def require_login(page, timeout, handler):
+            handler(button, timeout)
+        with (
+            session.executor,
+            patch("ft_runtime.wait_for_file_manager", side_effect=require_login),
+            patch("ft_runtime.load_settings", return_value=AppSettings()),
+            patch("ft_runtime.load_credentials", return_value=("user", "password")),
+        ):
+            session._ensure_file_manager()
+        session.login.assert_called_once()
+        button.wait_for.assert_called_once_with(state="visible", timeout=10_000)
+
     def test_download_api_rejects_html_and_redirects(self):
         html = Mock(ok=True, status=200, headers={"content-type": "text/html"})
         html.json.side_effect = ValueError("Expecting value")
@@ -547,6 +576,7 @@ class BatchCaptureTest(unittest.TestCase):
                 results = queue.Queue()
                 session = BrowserSession(Path(temporary) / "profile", results)
                 session.page = Mock()
+                session.page.is_closed.return_value = False
                 session.context = Mock()
                 try:
                     with (
@@ -742,6 +772,10 @@ class OrganizationalUiTest(unittest.TestCase):
         self.root.withdraw()
         with patch("captcha_lab.app_data_dir", return_value=Path(self.temporary.name)):
             self.app = CaptchaLabApp(self.root)
+        self.app._login = Mock()
+        for callback in self.root.tk.splitlist(self.root.tk.call("after", "info")):
+            if "_login" in str(self.root.tk.call("after", "info", callback)):
+                self.root.after_cancel(callback)
         self.root.update_idletasks()
 
     def tearDown(self):

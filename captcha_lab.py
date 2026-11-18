@@ -244,6 +244,7 @@ class CaptchaLabApp:
         self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
         self.root.after(self._download_interval_ms(), self._auto_download_tick)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(250, self._login)
 
     def _build_ui(self):
         self._configure_styles()
@@ -1629,7 +1630,7 @@ class CaptchaLabApp:
         username, password = self.username.get(), self.password.get()
         self._submit(
             "login",
-            self.browser.login,
+            self.browser.start_session,
             username,
             password,
             self.selector.get(),
@@ -1645,10 +1646,11 @@ class CaptchaLabApp:
         self.notebook.select(self.transfer_tab)
         self.auto_upload_suspended = False
         self.auto_download_suspended = False
-        if self.auto_upload_enabled.get():
-            self._upload_folder(automatic=True)
-        if self.auto_download_enabled.get() or self._same_origin_download_enabled():
-            self._download_available(automatic=True)
+        self.auto_upload_enabled.set(True)
+        self.auto_download_enabled.set(True)
+        self._save_preferences(announce=False)
+        self._upload_folder(automatic=True)
+        self._download_available(automatic=True)
 
     def _after_login(self, message, username, password):
         if not message.startswith("ورود موفق"):
@@ -1817,7 +1819,11 @@ def portable_self_test() -> int:
     expected = buffer.getvalue()
     data_url = "data:image/png;base64," + base64.b64encode(expected).decode("ascii")
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel="chromium", headless=True)
+        portable_browser = Path(getattr(sys, "_MEIPASS", "")) / "portable-chrome" / "chrome.exe"
+        browser_options = {"headless": True}
+        if portable_browser.is_file():
+            browser_options["executable_path"] = str(portable_browser)
+        browser = playwright.chromium.launch(**browser_options)
         page = browser.new_page()
         page.set_content(
             f'<img class="captcha" width="150" height="40" src="{data_url}">'
@@ -1831,6 +1837,9 @@ def portable_self_test() -> int:
     root.withdraw()
     root.update_idletasks()
     root.destroy()
+    if getattr(sys, "frozen", False):
+        bundle = load_model(Path(sys._MEIPASS) / "captcha-model")
+        predict_image(expected, bundle)
     return 0
 
 

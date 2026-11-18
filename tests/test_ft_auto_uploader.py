@@ -11,6 +11,8 @@ from ft_auto_uploader import (
     find_ready_files,
     list_upload_history,
     open_state,
+    process_file,
+    UnsupportedUploadError,
     parse_args,
     parse_transfer_name,
     scan_result,
@@ -169,6 +171,27 @@ class ScanResultTest(unittest.TestCase):
 
 
 class UploadInteractionTest(unittest.TestCase):
+    def test_unsupported_extension_is_skipped_without_repeating_upload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            source = folder / "document.json"
+            source.write_bytes(b"{}")
+            connection = open_state(folder / "state.db")
+            try:
+                with (
+                    patch("ft_auto_uploader._write_network_debug"),
+                    patch("ft_auto_uploader.upload_file", side_effect=UnsupportedUploadError("unsupported")) as upload,
+                    patch("ft_auto_uploader.wait_for_scan") as scan,
+                ):
+                    for _ in range(2):
+                        result = process_file(connection, Mock(), Mock(), source,
+                                              folder / "_uploaded", 30, Mock(), "thinclient")
+                        self.assertEqual(result, "unsupported")
+                    upload.assert_called_once()
+                    scan.assert_not_called()
+                    self.assertTrue(source.exists())
+            finally:
+                connection.close()
     def test_file_chooser_and_visible_confirmation_are_handled(self):
         page = Mock()
         upload_button = Mock()
@@ -185,11 +208,14 @@ class UploadInteractionTest(unittest.TestCase):
         response_context = MagicMock()
         response_event = Mock()
         response = Mock(ok=True)
+        response.url = "https://ft.nioc.ir/sarp-api/api/Scan/UploadFile"
+        response.request.method = "POST"
         response.request.url = "https://ft.nioc.ir/sarp-api/api/Scan/UploadFile"
         response.json.return_value = {"scanFileId": "scan-1"}
         response_event.value = response
         response_context.__enter__.return_value = response_event
         page.expect_response.return_value = response_context
+        page.on.side_effect = lambda _event, handler: handler(response)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "document.pdf"
@@ -205,8 +231,37 @@ class UploadInteractionTest(unittest.TestCase):
         upload_button.first.click.assert_called_once_with()
         self.assertEqual(staged_path.name, "__FT_TC__document.pdf")
         self.assertFalse(staged_path.exists())
-        confirmation_button.last.click.assert_called_once_with()
+        confirmation_button.get_by_role.assert_called_once_with("button", name="اسکن", exact=True)
+        confirmation_button.get_by_role.return_value.click.assert_called_once_with()
         self.assertEqual(result, "scan-1")
+
+    def test_failed_upload_cancels_visible_dialog(self):
+        page = Mock()
+        cancel = page.locator.return_value.get_by_role.return_value
+        cancel.count.return_value = 1
+        cancel.is_visible.return_value = True
+        with patch("ft_auto_uploader._upload_file", side_effect=RuntimeError("upload rejected")):
+            with self.assertRaisesRegex(RuntimeError, "upload rejected"):
+                upload_file(page, Path("document.json"), "thinclient")
+        cancel.click.assert_called_once_with(timeout=5_000)
+        cancel.wait_for.assert_called_once_with(state="hidden", timeout=5_000)
+
+    def test_extension_rejection_cancels_without_waiting_for_api(self):
+        page = Mock()
+        chooser_context = MagicMock()
+        page.expect_file_chooser.return_value = chooser_context
+        cancel = page.locator.return_value.get_by_role.return_value
+        cancel.count.return_value = 1
+        cancel.is_visible.return_value = True
+        page.get_by_text.return_value.first.is_visible.return_value = True
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "document.json"
+            source.write_bytes(b"{}")
+            with self.assertRaisesRegex(RuntimeError, "پسوند"):
+                upload_file(page, source, "thinclient")
+        cancel.click.assert_any_call(timeout=5_000)
+        page.wait_for_timeout.assert_not_called()
+        page.remove_listener.assert_called_once()
 
 
 class FileManagerLoginTest(unittest.TestCase):

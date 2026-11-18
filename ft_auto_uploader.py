@@ -35,6 +35,11 @@ QUEUE_URL = BASE_URL + "sarp-api/api/Scan/QueueForUploadFileFromQuarantineToSama
 UPLOAD_RESPONSE_SUFFIX = "/sarp-api/api/Scan/UploadFile"
 TEMP_SUFFIXES = {".crdownload", ".part", ".tmp"}
 NETWORK_DEBUG_NAME = "last-upload-network.console.txt"
+
+
+class UnsupportedUploadError(RuntimeError):
+    """FT explicitly rejected this file's extension before upload."""
+
 TRANSFER_PREFIXES = {
     "thinclient": "__FT_TC__",
     "intranet": "__FT_IN__",
@@ -451,19 +456,48 @@ def wait_for_file_manager(page, login_timeout_ms: int, login_handler=None) -> No
 
 
 def upload_file(page, path: Path, environment: str) -> str:
+    try:
+        return _upload_file(page, path, environment)
+    except Exception:
+        # Close only the upload dialog's explicit cancel action before the next file.
+        cancel = page.locator("div.v-dialog:visible").get_by_role(
+            "button", name="انصراف", exact=True
+        )
+        if cancel.count() == 1 and cancel.is_visible():
+            cancel.click(timeout=5_000)
+            cancel.wait_for(state="hidden", timeout=5_000)
+        raise
+
+
+def _upload_file(page, path: Path, environment: str) -> str:
     with staged_transfer_path(path, environment) as staged:
         with page.expect_file_chooser(timeout=10_000) as file_chooser_info:
             page.locator("button.mr-5").first.click()
         file_chooser_info.value.set_files(str(staged))
 
-        with page.expect_response(
-            lambda response: response.url.endswith(UPLOAD_RESPONSE_SUFFIX)
-            and response.request.method == "POST",
-            timeout=120_000,
-        ) as response_info:
-            page.locator("div.v-card__actions button:visible").last.click()
+        responses = []
 
-    response = response_info.value
+        def uploaded(response):
+            if response.url.split("?", 1)[0].endswith(UPLOAD_RESPONSE_SUFFIX) and response.request.method == "POST":
+                responses.append(response)
+
+        page.on("response", uploaded)
+        try:
+            page.locator("div.v-dialog:visible").get_by_role(
+                "button", name="اسکن", exact=True
+            ).click()
+            deadline = time.monotonic() + 120
+            rejected = page.get_by_text(re.compile(r"پسوند\s+فایل.*مجاز\s+نمی\s*باشد")).first
+            while not responses:
+                if rejected.is_visible():
+                    raise UnsupportedUploadError("پسوند فایل در FT مجاز نیست.")
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("مهلت دریافت پاسخ آپلود FT تمام شد.")
+                page.wait_for_timeout(200)
+        finally:
+            page.remove_listener("response", uploaded)
+
+    response = responses[0]
     request = response.request
     _write_network_debug(
         _build_upload_console_script(request.url, _multipart_file_field(request))
@@ -548,13 +582,18 @@ def process_file(
         archived = archive_file(path, archive_dir)
         _report(emit, "success", f"قبلاً ارسال شده؛ بایگانی شد: {archived.name}")
         return "queued"
-    if row and row[1] in {"rejected", "unknown"}:
+    if row and row[1] in {"rejected", "unknown", "unsupported"}:
         _report(emit, "warning", f"نتیجه قبلی «{row[1]}» است؛ رد شد: {path.name}")
         return row[1]
 
     scan_file_id = row[0] if row else None
     if not scan_file_id:
-        scan_file_id = upload_file(page, path, environment)
+        try:
+            scan_file_id = upload_file(page, path, environment)
+        except UnsupportedUploadError:
+            save_state(connection, file_hash, path, "", "unsupported")
+            _report(emit, "warning", f"پسوند فایل در FT مجاز نیست؛ از فایل عبور شد: {path.name}")
+            return "unsupported"
         save_state(connection, file_hash, path, scan_file_id, "uploaded")
         _report(emit, "info", f"آپلود شد و در انتظار اسکن است: {path.name}")
 

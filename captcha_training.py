@@ -411,6 +411,10 @@ def train_model(
 
 
 def load_model(model_dir: Path):
+    import sys
+    model_dir = Path(model_dir)
+    if getattr(sys, "frozen", False) and not (model_dir / "captcha_model.keras").exists():
+        model_dir = Path(sys._MEIPASS) / "captcha-model"
     np, Image, tf = _import_ml_dependencies()
     model_dir = Path(model_dir)
     metadata = json.loads(

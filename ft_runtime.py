@@ -35,6 +35,7 @@ from ft_auto_uploader import (
     wait_for_file_manager,
 )
 from ft_browser import launch_persistent_session
+from ft_settings import load_credentials, load_settings
 
 
 LOGIN_URL = "https://ft.nioc.ir/dargah/user/sign-in"
@@ -160,11 +161,28 @@ class BrowserSession:
     def _emit(self, level: str, message: str) -> None:
         self.results.put(RuntimeLog(level, message))
 
-    def _ensure_file_manager(self, login_timeout_minutes: float = 15.0) -> None:
-        if self.page is None:
+    def _ensure_file_manager(self, login_timeout_minutes: float = 15.0, *, automatic_login=True) -> None:
+        if self.page is None or self.context_closed or self.page.is_closed():
             self.open()
 
         def manual_login(upload_button, timeout_ms):
+            if automatic_login:
+                try:
+                    settings = load_settings(self.profile_dir.parent)
+                    credentials = load_credentials(self.profile_dir.parent)
+                    if credentials:
+                        self._emit("info", "نشست FT پایان یافته؛ ورود مجدد خودکار در حال انجام است.")
+                        self.login(
+                            *credentials, settings.selector,
+                            self.profile_dir.parent / "captcha-model",
+                            settings.minimum_confidence, settings.login_attempts,
+                            settings.captcha_submit_delay_seconds,
+                        )
+                        upload_button.wait_for(state="visible", timeout=10_000)
+                        self._emit("success", "ورود مجدد انجام شد؛ عملیات ادامه می‌یابد.")
+                        return
+                except Exception:
+                    self._emit("warning", "ورود مجدد خودکار تکمیل نشد.")
             self._emit("warning", "ورود لازم است؛ ورود دستی را در مرورگر کامل کنید.")
             upload_button.wait_for(state="visible", timeout=timeout_ms)
 
@@ -277,6 +295,18 @@ class BrowserSession:
 
     def cancel_batch(self):
         self.batch_cancelled.set()
+
+    def start_session(self, username, password, selector, model_dir,
+                      minimum_confidence, max_attempts, captcha_submit_delay_seconds=1.0):
+        try:
+            return self.login(username, password, selector, model_dir,
+                              minimum_confidence, max_attempts, captcha_submit_delay_seconds)
+        except Exception as error:
+            self._emit("warning", f"ورود خودکار انجام نشد: {error}")
+            self._emit("warning", "مرورگر برای ورود دستی باز است؛ ورود را در FT تکمیل کنید.")
+            self._open_page()
+            self._ensure_file_manager(automatic_login=False)
+            return "ورود دستی تکمیل شد."
 
     def login(
         self,
