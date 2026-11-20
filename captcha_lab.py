@@ -14,6 +14,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from app_icon import apply_app_icon
 from captcha_training import (
     import_labeled_batch,
     load_model,
@@ -152,6 +153,7 @@ def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
 class CaptchaLabApp:
     def __init__(self, root: tk.Tk, *, office_mode: bool = False):
         self.root = root
+        apply_app_icon(root)
         self.office_mode = office_mode
         title = "FT Office" if office_mode else "آزمایشگاه CAPTCHA سامانه FT"
         self.root.title(f"{title} — نسخه {APP_VERSION}")

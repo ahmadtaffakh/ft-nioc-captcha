@@ -10,6 +10,7 @@ if not model_path.is_file():
 
 datas = copy_metadata("playwright")
 datas.append((str(model_path), "captcha-model"))
+datas.append(("assets/ft-legal-transfer.png", "assets"))
 
 a = Analysis(
     ["ft_office.py"],
@@ -43,6 +44,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="FT-Office",
+    icon="assets/ft-legal-transfer.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

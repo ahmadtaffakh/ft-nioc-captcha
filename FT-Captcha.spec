@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import (
 )
 
 
-datas = []
+datas = [("assets/ft-legal-transfer.png", "assets")]
 for package in ("playwright", "keras"):
     datas += collect_data_files(package)
     datas += copy_metadata(package)
@@ -30,6 +30,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="FT-Captcha",
+    icon="assets/ft-legal-transfer.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
