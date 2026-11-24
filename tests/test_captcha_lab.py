@@ -894,6 +894,7 @@ class OrganizationalUiTest(unittest.TestCase):
                 "اتصال و CAPTCHA",
                 "داده و آموزش",
                 "خروجی و گزارش",
+                "پرگار",
             ],
         )
         nested = self.app.transfer_notebook
@@ -987,7 +988,7 @@ class OfficeUiTest(unittest.TestCase):
                 ]
                 self.assertEqual(
                     names,
-                    ["اطلاعات ورود", "آپلود و دانلود", "خروجی و گزارش"],
+                    ["اطلاعات ورود", "آپلود و دانلود", "خروجی و گزارش", "پرگار"],
                 )
                 self.assertIn("FT Office", root.title())
             finally:

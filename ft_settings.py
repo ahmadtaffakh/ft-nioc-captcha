@@ -15,6 +15,7 @@ APP_VERSION = "0.7.1"
 OFFICE_VERSION = "0.7.2"
 SETTINGS_FILENAME = "settings.json"
 CREDENTIALS_FILENAME = "credentials.dat"
+PARGAR_CREDENTIALS_FILENAME = "pargar-credentials.dat"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
 
 
@@ -37,6 +38,13 @@ class AppSettings:
     auto_download_enabled: bool = False
     thinclient_test_download: bool = False
     download_interval_seconds: int = 10
+    pargar_base_url: str = ""
+    pargar_watch_dir: str = ""
+    pargar_message_template: str = "فایل «{filename}» جهت بررسی ارسال می‌شود."
+    pargar_poll_seconds: int = 10
+    pargar_sender_json: str = ""
+    pargar_recipients_json: str = "[]"
+    pargar_process_existing: bool = False
 
     def validate(self) -> None:
         if not 1 <= self.sequence_length <= 10:
@@ -67,6 +75,21 @@ class AppSettings:
             raise ValueError("بازه دانلود خودکار باید بین ۵ و ۳۶۰۰ ثانیه باشد.")
         if self.environment not in {"", "thinclient", "intranet"}:
             raise ValueError("محیط اجرا معتبر نیست.")
+
+
+        if not 5 <= self.pargar_poll_seconds <= 3600:
+            raise ValueError("فاصله پایش پوشه باید بین ۵ تا ۳۶۰۰ ثانیه باشد.")
+        if not isinstance(self.pargar_process_existing, bool):
+            raise ValueError("گزینه فایل‌های موجود پرگار معتبر نیست.")
+        if "{filename}" not in self.pargar_message_template:
+            raise ValueError("قالب متن پیام باید شامل {filename} باشد.")
+        try:
+            recipients = json.loads(self.pargar_recipients_json)
+            sender = json.loads(self.pargar_sender_json) if self.pargar_sender_json else None
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("تنظیمات مخاطبین پرگار معتبر نیست.") from error
+        if not isinstance(recipients, list) or (sender is not None and not isinstance(sender, dict)):
+            raise ValueError("تنظیمات مخاطبین پرگار معتبر نیست.")
 
 
 class _DataBlob(ctypes.Structure):
@@ -231,6 +254,45 @@ def load_credentials(base_dir: Path) -> tuple[str, str] | None:
 
 def delete_credentials(base_dir: Path) -> bool:
     path = Path(base_dir) / CREDENTIALS_FILENAME
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
+def save_pargar_credentials(base_dir: Path, username: str, token: str) -> Path:
+    if not username.strip() or not token.strip():
+        raise ValueError("نام کاربری و API Token پرگار را وارد کنید.")
+    payload = json.dumps(
+        {"username": username.strip(), "token": token.strip()}, ensure_ascii=False
+    ).encode("utf-8")
+    encoded = base64.b64encode(protect_secret(payload))
+    base_dir = Path(base_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    path = base_dir / PARGAR_CREDENTIALS_FILENAME
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(encoded)
+    os.replace(temporary, path)
+    return path
+
+
+def load_pargar_credentials(base_dir: Path) -> tuple[str, str] | None:
+    path = Path(base_dir) / PARGAR_CREDENTIALS_FILENAME
+    if not path.exists():
+        return None
+    try:
+        protected = base64.b64decode(path.read_bytes(), validate=True)
+        payload = json.loads(unprotect_secret(protected).decode("utf-8"))
+        username, token = payload["username"], payload["token"]
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError("اطلاعات ورود پرگار قابل‌خواندن نیست.") from error
+    if not isinstance(username, str) or not isinstance(token, str) or not username or not token:
+        raise ValueError("اطلاعات ورود پرگار ناقص است.")
+    return username, token
+
+
+def delete_pargar_credentials(base_dir: Path) -> bool:
+    path = Path(base_dir) / PARGAR_CREDENTIALS_FILENAME
     if not path.exists():
         return False
     path.unlink()

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import queue
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
 from pathlib import Path
 
@@ -38,11 +40,15 @@ from ft_settings import (
     OFFICE_VERSION,
     AppSettings,
     delete_credentials,
+    delete_pargar_credentials,
     load_credentials,
+    load_pargar_credentials,
     load_settings,
     save_credentials,
+    save_pargar_credentials,
     save_settings,
 )
+from ft_pargar import DEFAULT_MESSAGE, PargarClient, PargarError, PargarFolderMonitor
 
 
 COLORS = {
@@ -171,6 +177,11 @@ class CaptchaLabApp:
         self.active_tasks = set()
         self.queued_browser_tasks = set()
         self.browser = BrowserSession(self.base_dir / "browser-profile", self.results, use_fava=True)
+        self.pargar_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pargar-api")
+        self.pargar_monitor = PargarFolderMonitor(
+            self.base_dir, lambda level, message: self.results.put(RuntimeLog(level, message))
+        )
+        self.pargar_task_number = 0
         self.current_image = None
         self.preview_reference = None
         self.closing = False
@@ -223,6 +234,30 @@ class CaptchaLabApp:
         self.download_interval_seconds = tk.IntVar(
             value=settings.download_interval_seconds
         )
+        self.pargar_base_url = tk.StringVar(value=settings.pargar_base_url)
+        self.pargar_watch_dir = tk.StringVar(value=settings.pargar_watch_dir)
+        self.pargar_message_template = tk.StringVar(value=settings.pargar_message_template or DEFAULT_MESSAGE)
+        self.pargar_poll_seconds = tk.IntVar(value=settings.pargar_poll_seconds)
+        self.pargar_sender_json = tk.StringVar(value=settings.pargar_sender_json)
+        self.pargar_recipients_json = tk.StringVar(value=settings.pargar_recipients_json)
+        self.pargar_process_existing = tk.BooleanVar(value=settings.pargar_process_existing)
+        self.pargar_username = tk.StringVar()
+        self.pargar_token = tk.StringVar()
+        self.pargar_credential_status = tk.StringVar(value="توکن پرگار ذخیره نشده است.")
+        self.pargar_monitor_status = tk.StringVar(value="پایش متوقف است.")
+        self.pargar_senders = []
+        self.pargar_recipients = []
+        self.pargar_sender_labels = {}
+        self.pargar_recipient_labels = {}
+        try:
+            pargar_credentials = load_pargar_credentials(self.base_dir)
+        except ValueError as error:
+            self.startup_warnings.append(str(error))
+        else:
+            if pargar_credentials:
+                self.pargar_username.set(pargar_credentials[0])
+                self.pargar_token.set(pargar_credentials[1])
+                self.pargar_credential_status.set("اطلاعات ورود پرگار با DPAPI ذخیره شده است.")
         self.remote_downloads = {}
         self.username = tk.StringVar(value=stored_username)
         self.password = tk.StringVar(value=stored_password)
@@ -248,6 +283,7 @@ class CaptchaLabApp:
             self._log("info", "اطلاعات ورود امن برای این حساب Windows بازیابی شد.")
         self._update_sample_count()
         self.root.after(100, self._poll_results)
+        self.root.after(1000, self._refresh_pargar_monitor_ui)
         self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
         self.root.after(self._download_interval_ms(), self._auto_download_tick)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -291,6 +327,7 @@ class CaptchaLabApp:
         self.notebook = ttk.Notebook(container)
         self.login_tab = ttk.Frame(self.notebook, padding=16)
         self.transfer_tab = ttk.Frame(self.notebook, padding=16)
+        self.pargar_tab = ttk.Frame(self.notebook, padding=16)
         self.browser_tab = ttk.Frame(self.notebook, padding=16)
         self.data_tab = ttk.Frame(self.notebook, padding=16)
         self.output_tab = ttk.Frame(self.notebook, padding=16)
@@ -300,6 +337,7 @@ class CaptchaLabApp:
             self.notebook.add(self.browser_tab, text="  اتصال و CAPTCHA  ")
             self.notebook.add(self.data_tab, text="  داده و آموزش  ")
         self.notebook.add(self.output_tab, text="  خروجی و گزارش  ")
+        self.notebook.add(self.pargar_tab, text="  پرگار  ")
         self.notebook.enable_traversal()
         self.transfer_notebook = ttk.Notebook(self.transfer_tab)
         self.transfer_notebook.pack(fill="both", expand=True)
@@ -314,6 +352,7 @@ class CaptchaLabApp:
         self._build_login_tab()
         self._build_upload_tab()
         self._build_download_tab()
+        self._build_pargar_tab()
         self._build_output_tab()
 
         status_bar = ttk.Frame(container, style="StatusBar.TFrame", padding=(10, 7))
@@ -786,6 +825,251 @@ class CaptchaLabApp:
         login.columnconfigure(1, weight=1)
         login.columnconfigure(2, weight=1)
         login.columnconfigure(3, weight=1)
+
+    def _build_pargar_tab(self):
+        api = ttk.LabelFrame(self.pargar_tab, text="اتصال پرگار", style="Card.TLabelframe", padding=12)
+        api.pack(fill="x", pady=(0, 8))
+        ttk.Label(api, text="نشانی پایه پرگار:").grid(row=0, column=3, sticky="e", padx=5, pady=4)
+        url_entry = ttk.Entry(api, textvariable=self.pargar_base_url, justify="left")
+        url_entry.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=4)
+        add_tooltip(url_entry, "نشانی سامانه تا مسیر Fonix، مانند https://server/Fonix")
+        ttk.Label(api, text="نام کاربری:").grid(row=1, column=3, sticky="e", padx=5, pady=4)
+        username_entry = ttk.Entry(api, textvariable=self.pargar_username, justify="left")
+        username_entry.grid(
+            row=1, column=2, sticky="ew", padx=5, pady=4
+        )
+        add_tooltip(username_entry, "نام کاربری همان حسابی است که برای API Token پرگار استفاده می‌شود.")
+        ttk.Label(api, text="API Token:").grid(row=1, column=1, sticky="e", padx=5, pady=4)
+        token_entry = ttk.Entry(api, textvariable=self.pargar_token, show="*", justify="left")
+        token_entry.grid(
+            row=1, column=0, sticky="ew", padx=5, pady=4
+        )
+        add_tooltip(token_entry, "توکن API در پرگار صادر می‌شود؛ این فیلد در تنظیمات عادی ذخیره نمی‌شود.")
+        self._button(api, "راهنمای دریافت توکن", self._pargar_token_help,
+                     "توکن طبق روال پرگار از کارپوشه دریافت می‌شود.").grid(row=2, column=3, padx=4, pady=4, sticky="ew")
+        self._button(api, "ذخیره امن اطلاعات", self._save_pargar_secret,
+                     "نام کاربری و توکن را با DPAPI ویندوز ذخیره می‌کند.").grid(row=2, column=2, padx=4, pady=4, sticky="ew")
+        self._button(api, "تست اتصال و دریافت مخاطبین", self._test_pargar_connection,
+                     "اعتبار توکن و دسترسی به فهرست فرستنده‌ها و گیرنده‌ها را بررسی می‌کند.",
+                     "Primary.TButton").grid(row=2, column=0, columnspan=2, padx=4, pady=4, sticky="ew")
+        ttk.Label(api, textvariable=self.pargar_credential_status, style="StatusMuted.TLabel").grid(
+            row=3, column=0, columnspan=3, sticky="e", padx=5
+        )
+        self._button(api, "حذف اطلاعات ذخیره‌شده", self._forget_pargar_secret,
+                     "نام کاربری و توکن ذخیره‌شده را از این رایانه حذف می‌کند.").grid(
+            row=3, column=3, padx=4, pady=4, sticky="ew"
+        )
+        for column in range(4):
+            api.columnconfigure(column, weight=1)
+
+        paths = ttk.LabelFrame(self.pargar_tab, text="پایش پوشه", style="Card.TLabelframe", padding=12)
+        paths.pack(fill="x", pady=8)
+        ttk.Label(paths, text="پوشه ورودی:").grid(row=0, column=2, sticky="e", padx=5)
+        ttk.Entry(paths, textvariable=self.pargar_watch_dir, justify="left").grid(
+            row=0, column=1, sticky="ew", padx=5, pady=4
+        )
+        self._button(paths, "انتخاب پوشه", self._browse_pargar_folder,
+                     "پوشه‌ای را انتخاب کنید که فایل‌های جدید در آن قرار می‌گیرند.").grid(row=0, column=0, padx=5)
+        ttk.Label(paths, text="فاصله پایش (ثانیه):").grid(row=1, column=2, sticky="e", padx=5)
+        ttk.Spinbox(paths, from_=5, to=3600, textvariable=self.pargar_poll_seconds, width=8).grid(
+            row=1, column=1, sticky="e", padx=5, pady=4
+        )
+        ttk.Checkbutton(paths, text="پردازش فایل‌های موجود هنگام شروع", variable=self.pargar_process_existing).grid(
+            row=1, column=0, sticky="e", padx=5, pady=4
+        )
+        paths.columnconfigure(1, weight=1)
+
+        contacts = ttk.LabelFrame(self.pargar_tab, text="فرستنده و گیرندگان", style="Card.TLabelframe", padding=10)
+        contacts.pack(fill="both", expand=True, pady=8)
+        ttk.Label(contacts, text="فرستنده").grid(row=0, column=1, sticky="e", padx=4)
+        ttk.Label(contacts, text="گیرندگان (چندانتخابی)").grid(row=0, column=0, sticky="e", padx=4)
+        self.pargar_sender_list = tk.Listbox(contacts, height=5, exportselection=False)
+        self.pargar_sender_list.grid(row=1, column=1, sticky="nsew", padx=4)
+        self.pargar_recipient_list = tk.Listbox(contacts, height=5, selectmode="extended", exportselection=False)
+        self.pargar_recipient_list.grid(row=1, column=0, sticky="nsew", padx=4)
+        self.pargar_sender_list.bind("<<ListboxSelect>>", self._pargar_selection_changed)
+        self.pargar_recipient_list.bind("<<ListboxSelect>>", self._pargar_selection_changed)
+        contacts.columnconfigure(0, weight=1)
+        contacts.columnconfigure(1, weight=1)
+        contacts.rowconfigure(1, weight=1)
+
+        message = ttk.LabelFrame(self.pargar_tab, text="پیام ارسالی", style="Card.TLabelframe", padding=10)
+        message.pack(fill="x", pady=8)
+        ttk.Label(message, text="موضوع از نام فایل ساخته می‌شود؛ متن:").pack(anchor="e")
+        ttk.Entry(message, textvariable=self.pargar_message_template, justify="right").pack(fill="x", pady=4)
+        ttk.Label(message, text="از {filename} برای درج نام کامل فایل استفاده کنید.", style="StatusMuted.TLabel").pack(anchor="e")
+
+        actions = ttk.Frame(self.pargar_tab)
+        actions.pack(fill="x", pady=(4, 0))
+        self.pargar_start_button = self._button(actions, "شروع پایش", self._start_pargar_monitor,
+                                                "ارسال خودکار فایل‌های پایدار و جدید را آغاز می‌کند.", "Primary.TButton")
+        self.pargar_stop_button = self._button(actions, "توقف پایش", self._stop_pargar_monitor,
+                                               "پایش پوشه پرگار را متوقف می‌کند.")
+        self.pargar_start_button.pack(side="right", padx=4)
+        self.pargar_stop_button.pack(side="right", padx=4)
+        self.pargar_stop_button.state(["disabled"])
+        ttk.Label(actions, textvariable=self.pargar_monitor_status, style="StatusMuted.TLabel").pack(side="left", padx=8)
+
+    def _pargar_selection_changed(self, _event=None):
+        if not self.pargar_sender_labels and not self.pargar_recipient_labels:
+            return
+        self._persist_pargar_contacts()
+        self._save_preferences(announce=False)
+
+    def _forget_pargar_secret(self):
+        try:
+            removed = delete_pargar_credentials(self.base_dir)
+        except OSError as error:
+            self._log("error", f"حذف اطلاعات پرگار انجام نشد: {error}")
+            return
+        self.pargar_username.set("")
+        self.pargar_token.set("")
+        self.pargar_credential_status.set("اطلاعات پرگار از حافظه محلی حذف شد.")
+        self._log("warning" if removed else "info", "اطلاعات ورود پرگار حذف شد." if removed else "اطلاعات ذخیره‌شده‌ای برای حذف وجود نداشت.")
+
+    def _pargar_token_help(self):
+        messagebox.showinfo(
+            "دریافت API Token پرگار",
+            "در کارپوشه پرگار وارد شوید، روی نام کاربری خود کلیک کنید و گزینه صدور توکن را بزنید. "
+            "پس از واردکردن نام کاربری، گذرواژه و مدت اعتبار، توکن نمایش‌داده‌شده را در این صفحه وارد و ذخیره کنید. "
+            "صدور خودکار توکن در وب‌سرویس مستند نشده است.",
+        )
+
+    def _save_pargar_secret(self):
+        try:
+            save_pargar_credentials(self.base_dir, self.pargar_username.get(), self.pargar_token.get())
+        except (OSError, RuntimeError, ValueError) as error:
+            self._log("error", f"ذخیره اطلاعات پرگار انجام نشد: {error}")
+            messagebox.showerror("خطا", str(error))
+            return
+        self.pargar_credential_status.set("نام کاربری و توکن پرگار با DPAPI ویندوز ذخیره شدند.")
+        self._log("success", "اطلاعات ورود پرگار به‌صورت محافظت‌شده ذخیره شد.")
+
+    def _pargar_client(self):
+        return PargarClient(
+            self.pargar_base_url.get(), self.pargar_username.get(), self.pargar_token.get()
+        )
+
+    def _submit_pargar(self, operation, function, *args, success=None):
+        self.pargar_task_number += 1
+        task_id = f"{operation}-{self.pargar_task_number}"
+        self.callbacks[task_id] = success
+        self.queued_browser_tasks.add(task_id)
+        self._mark_task_started(task_id)
+        self._log("info", f"شروع عملیات پرگار: {operation}")
+        future = self.pargar_executor.submit(function, *args)
+        def completed(done):
+            try:
+                payload = done.result()
+                result = RuntimeResult(task_id, operation, True, payload)
+            except Exception as error:
+                result = RuntimeResult(task_id, operation, False, str(error))
+            self.results.put(result)
+        future.add_done_callback(completed)
+
+    def _test_pargar_connection(self):
+        try:
+            client = self._pargar_client()
+        except (ValueError, PargarError) as error:
+            messagebox.showerror("تنظیمات پرگار", str(error))
+            return
+        def check():
+            client.test_connection()
+            senders = client.candidates(sender=True)
+            recipients = client.candidates()
+            return senders, recipients
+        self._submit_pargar("pargar_connection_test", check, success=self._show_pargar_candidates)
+
+    def _show_pargar_candidates(self, payload):
+        self.pargar_senders, self.pargar_recipients = payload
+        self.pargar_sender_list.delete(0, "end")
+        self.pargar_recipient_list.delete(0, "end")
+        self.pargar_sender_labels.clear()
+        self.pargar_recipient_labels.clear()
+        sender_saved = None
+        recipients_saved = set()
+        try:
+            sender_saved = json.loads(self.pargar_sender_json.get()) if self.pargar_sender_json.get() else None
+            recipients_saved = {
+                str(item.get("Contactid") or item.get("ContactId"))
+                for item in json.loads(self.pargar_recipients_json.get())
+            }
+        except (TypeError, json.JSONDecodeError, AttributeError):
+            pass
+        saved_sender_id = str((sender_saved or {}).get("Contactid") or (sender_saved or {}).get("ContactId") or "")
+        for index, item in enumerate(self.pargar_senders):
+            label = str(item.get("text") or item.get("Name") or item.get("id") or "مخاطب بدون عنوان")
+            self.pargar_sender_list.insert("end", label)
+            contact_id = str(item.get("Contactid") or item.get("ContactId") or "")
+            self.pargar_sender_labels[index] = item
+            if contact_id and contact_id == saved_sender_id:
+                self.pargar_sender_list.selection_set(index)
+        for index, item in enumerate(self.pargar_recipients):
+            label = str(item.get("text") or item.get("Name") or item.get("id") or "مخاطب بدون عنوان")
+            self.pargar_recipient_list.insert("end", label)
+            self.pargar_recipient_labels[index] = item
+            contact_id = str(item.get("Contactid") or item.get("ContactId") or "")
+            if contact_id and contact_id in recipients_saved:
+                self.pargar_recipient_list.selection_set(index)
+        self._log("success", f"اتصال پرگار برقرار شد؛ {len(self.pargar_senders)} فرستنده و {len(self.pargar_recipients)} گیرنده دریافت شد.")
+        self.status.set("فهرست مخاطبین پرگار دریافت شد.")
+
+    def _browse_pargar_folder(self):
+        folder = filedialog.askdirectory(title="انتخاب پوشه ورودی پرگار")
+        if folder:
+            self.pargar_watch_dir.set(folder)
+
+    def _persist_pargar_contacts(self):
+        sender_selection = self.pargar_sender_list.curselection()
+        receiver_selection = self.pargar_recipient_list.curselection()
+        sender = self.pargar_sender_labels.get(sender_selection[0]) if sender_selection else None
+        receivers = [self.pargar_recipient_labels[index] for index in receiver_selection]
+        def compact(item):
+            if not item:
+                return {}
+            return {
+                "Contactid": item.get("Contactid") or item.get("ContactId"),
+                "id": item.get("id"),
+                "text": item.get("text") or item.get("Name"),
+                "IsGroup": item.get("IsGroup"),
+            }
+        self.pargar_sender_json.set(json.dumps(compact(sender), ensure_ascii=False))
+        self.pargar_recipients_json.set(json.dumps([compact(item) for item in receivers], ensure_ascii=False))
+        return sender, receivers
+
+    def _start_pargar_monitor(self):
+        try:
+            settings = self._current_settings()
+            sender, receivers = self._persist_pargar_contacts()
+            if not sender or not receivers:
+                raise ValueError("یک فرستنده و حداقل یک گیرنده انتخاب کنید.")
+            client = self._pargar_client()
+            if not self._save_preferences(announce=False):
+                return
+            save_pargar_credentials(self.base_dir, self.pargar_username.get(), self.pargar_token.get())
+            self.pargar_monitor.start(
+                folder=Path(settings.pargar_watch_dir), client=client, sender=sender,
+                receivers=receivers, template=settings.pargar_message_template,
+                interval=settings.pargar_poll_seconds, process_existing=settings.pargar_process_existing,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            messagebox.showerror("شروع پایش پرگار", str(error))
+            return
+        self.pargar_monitor_status.set("پایش فعال است.")
+        self.pargar_start_button.state(["disabled"])
+        self.pargar_stop_button.state(["!disabled"])
+
+    def _stop_pargar_monitor(self):
+        self.pargar_monitor.stop()
+        self.pargar_monitor_status.set("در حال توقف...")
+        self.pargar_stop_button.state(["disabled"])
+
+    def _refresh_pargar_monitor_ui(self):
+        if not self.pargar_monitor.running:
+            self.pargar_monitor_status.set("پایش متوقف است.")
+            self.pargar_start_button.state(["!disabled"])
+            self.pargar_stop_button.state(["disabled"])
+        self.root.after(1000, self._refresh_pargar_monitor_ui)
 
     def _build_output_tab(self):
         toolbar = ttk.Frame(self.output_tab)
@@ -1464,6 +1748,13 @@ class CaptchaLabApp:
                 auto_download_enabled=self.auto_download_enabled.get(),
                 thinclient_test_download=self.thinclient_test_download.get(),
                 download_interval_seconds=self.download_interval_seconds.get(),
+                pargar_base_url=self.pargar_base_url.get().strip(),
+                pargar_watch_dir=self.pargar_watch_dir.get().strip(),
+                pargar_message_template=self.pargar_message_template.get(),
+                pargar_poll_seconds=self.pargar_poll_seconds.get(),
+                pargar_sender_json=self.pargar_sender_json.get(),
+                pargar_recipients_json=self.pargar_recipients_json.get(),
+                pargar_process_existing=self.pargar_process_existing.get(),
             )
             settings.validate()
         except (tk.TclError, ValueError) as error:
@@ -1904,6 +2195,8 @@ class CaptchaLabApp:
         ):
             return
         self._save_preferences(announce=False)
+        self.pargar_monitor.stop()
+        self.pargar_executor.shutdown(wait=False, cancel_futures=True)
         self.closing = True
         self.browser.cancel_batch()
         self.status.set("در حال بستن مرورگر...")
