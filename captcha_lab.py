@@ -35,6 +35,7 @@ from ft_runtime import (
 )
 from ft_settings import (
     APP_VERSION,
+    OFFICE_VERSION,
     AppSettings,
     delete_credentials,
     load_credentials,
@@ -156,8 +157,9 @@ class CaptchaLabApp:
         self.root = root
         apply_app_icon(root)
         self.office_mode = office_mode
+        self.version = OFFICE_VERSION if office_mode else APP_VERSION
         title = "FT Office" if office_mode else "آزمایشگاه CAPTCHA سامانه FT"
-        self.root.title(f"{title} — نسخه {APP_VERSION}")
+        self.root.title(f"{title} — نسخه {self.version}")
         self.root.geometry("980x720")
         self.root.minsize(860, 640)
         self.base_dir = app_data_dir()
@@ -282,7 +284,7 @@ class CaptchaLabApp:
         ).pack(fill="x", pady=(3, 0))
         ttk.Label(
             header,
-            text=f"نسخه {APP_VERSION}",
+            text=f"نسخه {self.version}",
             style="VersionBadge.TLabel",
         ).pack(side="left", padx=(0, 12))
 
