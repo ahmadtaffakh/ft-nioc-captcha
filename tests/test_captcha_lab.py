@@ -587,6 +587,80 @@ class BatchCaptureTest(unittest.TestCase):
             wait.assert_not_called()
             self.assertEqual(result, {"processed": 0, "failed": 0, "oversized": 0})
 
+    def test_fava_folder_is_created_once_and_resolved_by_listing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = BrowserSession(Path(temporary), queue.Queue(), use_fava=True)
+            session.context = Mock()
+            folder = {"id": "folder", "name": "فاوا", "directory": True}
+            try:
+                with (
+                    patch.object(session, "_file_manager_items", side_effect=[[], [folder], [folder]]),
+                    patch.object(session, "_response_data"),
+                ):
+                    self.assertEqual(session._fava_folder_id({}, "group", create=True), "folder")
+                    self.assertEqual(session._fava_folder_id({}, "group", create=True), "folder")
+                session.context.request.post.assert_called_once()
+                self.assertEqual(
+                    session.context.request.post.call_args.kwargs["data"],
+                    {"name": "فاوا", "parentId": None, "GroupId": "group", "accessLevel": None},
+                )
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
+    def test_fava_cleanup_revalidates_preview_and_only_deletes_listed_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = BrowserSession(Path(temporary), queue.Queue(), use_fava=True)
+            session.context = Mock()
+            try:
+                with (
+                    patch.object(session, "_ensure_file_manager"),
+                    patch.object(session, "_file_manager_headers", return_value={}),
+                    patch.object(session, "_default_group_id", return_value="group"),
+                    patch.object(session, "_fava_folder_id", return_value="folder"),
+                    patch.object(session, "_file_manager_items") as items,
+                    patch.object(session, "_response_data"),
+                ):
+                    records = [
+                        {"id": "subfolder", "directory": True, "parentId": "folder"},
+                        {"id": "file", "directory": False, "parentId": "folder"},
+                    ]
+                    items.return_value = records
+                    preview = session.preview_fava_cleanup()
+                    self.assertEqual(preview, ("group", "folder", ("file",)))
+                    items.return_value = records[:1]
+                    with self.assertRaises(RuntimeError):
+                        session.delete_fava_files(preview)
+                    session.context.request.delete.assert_not_called()
+                    items.return_value = records
+                    self.assertEqual(session.delete_fava_files(preview), 1)
+                    self.assertEqual(
+                        session.context.request.delete.call_args.kwargs["data"],
+                        {"ids": ["file"], "groupId": "group"},
+                    )
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
+    def test_automatic_upload_skips_unchanged_failure_before_applying_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary) / "inbox"
+            folder.mkdir()
+            first, second = (folder / name for name in ("a.zip", "b.zip"))
+            first.write_bytes(b"bad")
+            second.write_bytes(b"next")
+            session = BrowserSession(Path(temporary) / "profile", queue.Queue())
+            try:
+                with (
+                    patch.object(session, "_ensure_file_manager"),
+                    patch("ft_runtime.process_file", side_effect=[RuntimeError("HTTP 400"), None, None]) as process,
+                ):
+                    session.upload_folder(folder, 1, 0, "thinclient", automatic=True)
+                    session.upload_folder(folder, 1, 0, "thinclient", automatic=True)
+                    first.write_bytes(b"changed")
+                    session.upload_folder(folder, 1, 0, "thinclient", automatic=True)
+                self.assertEqual([call.args[3] for call in process.call_args_list], [first, second, first])
+            finally:
+                session.executor.shutdown(wait=False, cancel_futures=True)
+
     def test_upload_stops_only_after_two_consecutive_errors(self):
         scenarios = (
             ([Exception("first"), None, Exception("third"), None], 4, False),
@@ -698,17 +772,17 @@ class BatchCaptureTest(unittest.TestCase):
         self.assertEqual(
             session.context.request.get.call_args_list,
             [
-                call("https://ft.nioc.ir/webapi/api/v1/Group/GetAllUserGroups",
-                     headers={"X-Role": "test-role"}, max_redirects=0),
-                call("https://ft.nioc.ir/webapi/api/v1/File/DownloadFile",
-                     headers={"X-Role": "test-role"}, max_redirects=0,
+                call("https://ft.nioc.ir/filemanager-api/api/v1/Group/GetAllUserGroups",
+                     headers={}, max_redirects=0),
+                call("https://ft.nioc.ir/filemanager-api/api/v1/File/DownloadFile",
+                     headers={}, max_redirects=0,
                      params={"fileId": "remote-1", "groupId": "group-1"},
                      timeout=120_000),
             ],
         )
         listing_url, = session.context.request.put.call_args.args
-        self.assertEqual(listing_url, "https://ft.nioc.ir/webapi/api/v1/File/GetFilesAndFolders")
-        self.assertEqual(session.context.request.put.call_args.kwargs["headers"], {"X-Role": "test-role"})
+        self.assertEqual(listing_url, "https://ft.nioc.ir/filemanager-api/api/v1/File/GetFilesAndFolders")
+        self.assertEqual(session.context.request.put.call_args.kwargs["headers"], {})
         self.assertEqual(result, {"downloaded": 1, "skipped": 0, "failed": 0})
         self.assertEqual(reverse, "downloaded")
 

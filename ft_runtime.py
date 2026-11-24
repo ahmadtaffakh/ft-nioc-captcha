@@ -49,9 +49,7 @@ USERNAME_SELECTOR = "div.itc-card__content > div > div:nth-of-type(1) input"
 PASSWORD_SELECTOR = "div.itc-card__content > div > div:nth-of-type(2) input"
 CAPTCHA_INPUT_SELECTOR = "div.itc-card__content > div > div:nth-of-type(3) input:visible"
 FILE_MANAGER_API = "https://ft.nioc.ir/webapi/api/v1/"
-GROUPS_URL = FILE_MANAGER_API + "Group/GetAllUserGroups"
-FILES_URL = FILE_MANAGER_API + "File/GetFilesAndFolders"
-DOWNLOAD_URL = FILE_MANAGER_API + "File/DownloadFile"
+INTRANET_FILE_MANAGER_API = "https://ft.nioc.ir/filemanager-api/api/v1/"
 
 
 def load_model(model_dir: Path):
@@ -149,8 +147,10 @@ class BrowserSession:
     """Serialize all synchronous Playwright access on one browser thread."""
 
     def __init__(
-        self, profile_dir: Path, results: queue.Queue[RuntimeResult | RuntimeLog | RuntimeStarted]
+        self, profile_dir: Path, results: queue.Queue[RuntimeResult | RuntimeLog | RuntimeStarted],
+        *, use_fava: bool = False,
     ):
+        self.use_fava = use_fava
         self.profile_dir = Path(profile_dir)
         self.results = results
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ft-browser")
@@ -160,6 +160,8 @@ class BrowserSession:
         self.page = None
         self.batch_cancelled = threading.Event()
         self._task_numbers = itertools.count(1)
+        self.transfers_paused = threading.Event()
+        self._upload_failures: dict[tuple[Path, str], dict[Path, tuple[int, int]]] = {}
 
     def submit(self, operation: str, function: Callable, *args) -> str:
         task_id = f"{operation}-{next(self._task_numbers)}"
@@ -396,14 +398,30 @@ class BrowserSession:
         environment: str = "",
         scan_timeout_minutes: float = 30.0,
         login_timeout_minutes: float = 15.0,
+        *,
+        automatic: bool = False,
     ):
+        if self.transfers_paused.is_set():
+            return {"processed": 0, "failed": 0, "oversized": 0}
         folder = Path(folder)
         if not folder.is_dir():
             raise ValueError("پوشه انتخاب‌شده وجود ندارد.")
         if max_files < 0 or max_file_size_mb < 0:
             raise ValueError("محدودیت تعداد و حجم نباید منفی باشد.")
+        candidates = list_candidate_files(folder)
+        signatures = {}
+        for path in candidates:
+            stat = path.stat()
+            signatures[path] = (stat.st_size, stat.st_mtime_ns)
+        failure_key = (folder.resolve(), environment)
+        failures = {
+            path: signature
+            for path, signature in self._upload_failures.get(failure_key, {}).items()
+            if signatures.get(path) == signature
+        }
+        self._upload_failures[failure_key] = failures
         selected, oversized = select_files_for_run(
-            list_candidate_files(folder),
+            [path for path in candidates if not automatic or path not in failures],
             max_files,
             int(max_file_size_mb * 1024 * 1024),
         )
@@ -414,6 +432,19 @@ class BrowserSession:
 
         validate_environment(environment)
         self._ensure_file_manager(login_timeout_minutes)
+        if self.use_fava:
+            try:
+                api_base, headers = self._transfer_file_manager(environment)
+                group_id = self._default_group_id(api_base, headers)
+                folder_id = self._fava_folder_id(headers, group_id, create=True, api_base=api_base)
+                self._open_fava_folder(folder_id, group_id)
+            except Exception as error:
+                self._emit("warning", f"پوشه فاوا در دسترس نیست. آپلود از ریشه ادامه می‌یابد. {error}")
+                if self.page.url != FILE_MANAGER_URL:
+                    self.page.goto(FILE_MANAGER_URL, wait_until="domcontentloaded")
+                self._ensure_file_manager(login_timeout_minutes)
+                if self.page.url != FILE_MANAGER_URL:
+                    raise RuntimeError("مسیر ریشه مدیریت فایل برای آپلود قابل تأیید نیست.")
 
         connection = open_state(self.profile_dir.parent / "state.db")
         failed = 0
@@ -422,6 +453,8 @@ class BrowserSession:
         stopped = False
         try:
             for path in selected:
+                if self.transfers_paused.is_set():
+                    break
                 processed += 1
                 try:
                     process_file(
@@ -434,8 +467,10 @@ class BrowserSession:
                         self._emit,
                         environment,
                     )
+                    failures.pop(path, None)
                     consecutive_failures = 0
                 except Exception as error:
+                    failures[path] = signatures[path]
                     failed += 1
                     consecutive_failures += 1
                     self._emit("error", f"خطا برای {path.name}: {error}")
@@ -488,9 +523,11 @@ class BrowserSession:
         )
         return {"X-Role": role} if isinstance(role, str) and role else {}
 
-    def _default_group_id(self, headers: dict[str, str]) -> str:
+    def _default_group_id(self, api_base: str, headers: dict[str, str]) -> str:
         groups = self._response_data(
-            self.context.request.get(GROUPS_URL, headers=headers, max_redirects=0),
+            self.context.request.get(
+                api_base + "Group/GetAllUserGroups", headers=headers, max_redirects=0
+            ),
             "دریافت گروه‌های فایل",
         )
         groups = groups if isinstance(groups, list) else []
@@ -501,6 +538,105 @@ class BrowserSession:
         if not selected or not selected.get("id"):
             raise RuntimeError("گروه پیش‌فرض و یکتای مدیریت فایل مشخص نیست.")
         return str(selected["id"])
+
+    def _file_manager_items(self, api_base, headers, group_id, parent_id=None):
+        page_index = 1
+        while True:
+            query = {
+                "pageSize": 100, "pageIndex": page_index, "WithThumbnail": False,
+                "groupId": group_id, "SortBy": 0, "SortDirection": 0,
+            }
+            if parent_id is not None:
+                query["parentId"] = parent_id
+            data = self._response_data(
+                self.context.request.put(
+                    api_base + "File/GetFilesAndFolders", headers=headers,
+                    max_redirects=0, data=query,
+                ),
+                "دریافت فهرست فایل‌ها",
+            )
+            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                raise RuntimeError("پاسخ فهرست فایل‌ها معتبر نیست.")
+            yield from data["items"]
+            if page_index * query["pageSize"] >= int(data.get("totalCount") or 0):
+                return
+            page_index += 1
+
+    def _open_fava_folder(self, folder_id: str, group_id: str) -> None:
+        folder_url = f"{FILE_MANAGER_URL.rsplit('/', 1)[0]}/{folder_id}"
+        listing_urls = {
+            base + "File/GetFilesAndFolders"
+            for base in (FILE_MANAGER_API, INTRANET_FILE_MANAGER_API)
+        }
+
+        def lists_target_folder(response):
+            request = response.request
+            if response.url not in listing_urls or request.method != "PUT":
+                return False
+            body = request.post_data_json
+            return (
+                isinstance(body, dict)
+                and body.get("parentId") == folder_id
+                and body.get("groupId") == group_id
+            )
+
+        with self.page.expect_response(lists_target_folder, timeout=8_000) as listing:
+            self.page.goto(folder_url, wait_until="domcontentloaded")
+        data = self._response_data(listing.value, "باز کردن پوشه فاوا")
+        if self.page.url != folder_url or not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise RuntimeError("باز شدن مسیر پوشه فاوا قابل تأیید نیست.")
+
+    def _fava_folder_id(self, headers, group_id, *, create, api_base=FILE_MANAGER_API, root_items=None):
+        def find(items):
+            matches = [
+                item for item in items if item.get("name") == "فاوا"
+            ]
+            if not matches:
+                return None
+            if len(matches) != 1 or matches[0].get("directory") is not True or not matches[0].get("id"):
+                raise RuntimeError("پوشه فاوا در گروه فعال یکتا و معتبر نیست.")
+            return str(matches[0]["id"])
+
+        if root_items is None:
+            root_items = self._file_manager_items(api_base, headers, group_id)
+        folder_id = find(root_items)
+        if folder_id is None and create:
+            self._response_data(
+                self.context.request.post(
+                    api_base + "File/AddNewFolder", headers=headers, max_redirects=0,
+                    data={"name": "فاوا", "parentId": None, "GroupId": group_id, "accessLevel": None},
+                ),
+                "ساخت پوشه فاوا",
+            )
+            folder_id = find(self._file_manager_items(api_base, headers, group_id))
+            if folder_id is None:
+                raise RuntimeError("شناسه پوشه فاوا پس از ساخت پیدا نشد.")
+        return folder_id
+
+    def _transfer_file_manager(self, environment):
+        if environment == "intranet":
+            return INTRANET_FILE_MANAGER_API, {}
+        return FILE_MANAGER_API, self._file_manager_headers()
+
+    def _download_items(self, api_base, headers, group_id):
+        root_items = list(self._file_manager_items(api_base, headers, group_id))
+        yield from ((item, False) for item in root_items)
+        if not self.use_fava:
+            return
+        try:
+            folder_id = self._fava_folder_id(
+                headers, group_id, create=False, api_base=api_base, root_items=root_items
+            )
+            if folder_id is None:
+                self._emit("warning", "پوشه فاوا پیدا نشد. دانلود از ریشه ادامه می‌یابد.")
+                return
+            items = list(self._file_manager_items(api_base, headers, group_id, folder_id))
+            if any(item.get("parentId") != folder_id for item in items):
+                raise RuntimeError("مسیر موارد پوشه فاوا قابل تأیید نیست.")
+        except Exception as error:
+            self._emit("warning", f"پوشه فاوا در دسترس نیست. دانلود از ریشه ادامه می‌یابد. {error}")
+            return
+        yield from ((item, True) for item in items)
 
     def list_downloadable_files(
         self,
@@ -513,57 +649,66 @@ class BrowserSession:
         if allow_same_origin and environment == "thinclient":
             allowed_origins.add(environment)
         self._ensure_file_manager(login_timeout_minutes)
-        headers = self._file_manager_headers()
-        group_id = self._default_group_id(headers)
-        page_size = 100
-        page_index = 1
+        api_base, headers = self._transfer_file_manager(environment)
+        group_id = self._default_group_id(api_base, headers)
         records = []
-        while True:
-            data = self._response_data(
-                self.context.request.put(
-                    FILES_URL,
-                    headers=headers,
-                    max_redirects=0,
-                    data={
-                        "pageSize": page_size,
-                        "pageIndex": page_index,
-                        "WithThumbnail": False,
-                        "groupId": group_id,
-                        "SortBy": 0,
-                        "SortDirection": 0,
-                    },
-                ),
-                "دریافت فهرست فایل‌ها",
+        for item, _ in self._download_items(api_base, headers, group_id):
+            if item.get("directory") is True:
+                continue
+            remote_name = f"{item.get('name') or ''}{item.get('extension') or ''}"
+            parsed = parse_transfer_name(remote_name)
+            if not parsed or parsed[0] not in allowed_origins:
+                continue
+            remote_id = item.get("id")
+            item_group_id = item.get("groupId") or group_id
+            if not remote_id or not item_group_id:
+                continue
+            records.append(
+                {
+                    "remote_id": str(remote_id),
+                    "group_id": str(item_group_id),
+                    "remote_name": remote_name,
+                    "name": parsed[1],
+                    "size": int(item.get("size") or 0),
+                    "origin": parsed[0],
+                }
             )
-            if not isinstance(data, dict):
-                raise RuntimeError("پاسخ فهرست فایل‌ها معتبر نیست.")
-            items = data.get("items") or []
-            for item in items:
+        return records
+
+    def preview_fava_cleanup(self):
+        self._ensure_file_manager()
+        headers = self._file_manager_headers()
+        group_id = self._default_group_id(FILE_MANAGER_API, headers)
+        folder_id = self._fava_folder_id(headers, group_id, create=False)
+        ids = set()
+        if folder_id:
+            for item in self._file_manager_items(FILE_MANAGER_API, headers, group_id, folder_id):
                 if item.get("directory") is True:
                     continue
-                remote_name = f"{item.get('name') or ''}{item.get('extension') or ''}"
-                parsed = parse_transfer_name(remote_name)
-                if not parsed or parsed[0] not in allowed_origins:
-                    continue
-                remote_id = item.get("id")
-                item_group_id = item.get("groupId") or group_id
-                if not remote_id or not item_group_id:
-                    continue
-                records.append(
-                    {
-                        "remote_id": str(remote_id),
-                        "group_id": str(item_group_id),
-                        "remote_name": remote_name,
-                        "name": parsed[1],
-                        "size": int(item.get("size") or 0),
-                        "origin": parsed[0],
-                    }
+                if item.get("directory") is not False or not item.get("id") or item.get("parentId") != folder_id:
+                    raise RuntimeError("نوع یا مسیر یکی از موارد پوشه فاوا قابل تأیید نیست.")
+                ids.add(str(item["id"]))
+        return group_id, folder_id, tuple(sorted(ids))
+
+    def delete_fava_files(self, preview):
+        if self.preview_fava_cleanup() != preview:
+            raise RuntimeError("محتویات فاوا تغییر کرده است. پیش‌نمایش را دوباره بگیرید.")
+        group_id, _, ids = preview
+        headers = self._file_manager_headers()
+        deleted = 0
+        for file_id in ids:
+            try:
+                self._response_data(
+                    self.context.request.delete(
+                        FILE_MANAGER_API + "File", headers=headers, max_redirects=0,
+                        data={"ids": [file_id], "groupId": group_id},
+                    ),
+                    "حذف فایل از فاوا",
                 )
-            total_count = int(data.get("totalCount") or 0)
-            if page_index * page_size >= total_count:
-                break
-            page_index += 1
-        return records
+            except Exception as error:
+                raise RuntimeError(f"حذف پس از تأیید {deleted} فایل متوقف شد. {error}") from error
+            deleted += 1
+        return deleted
 
     @staticmethod
     def _unused_destination(folder: Path, name: str) -> Path:
@@ -583,6 +728,8 @@ class BrowserSession:
         allow_same_origin: bool = False,
         cancelled: threading.Event | None = None,
     ) -> dict:
+        if self.transfers_paused.is_set():
+            return {"downloaded": 0, "skipped": 0, "failed": 0}
         expected_origin = opposite_environment(environment)
         allowed_origins = {expected_origin}
         if allow_same_origin and environment == "thinclient":
@@ -592,12 +739,20 @@ class BrowserSession:
         if upload_dir and Path(upload_dir).resolve() == destination_dir:
             raise ValueError("پوشه دانلود نباید همان پوشه ورودی آپلود باشد.")
         self._ensure_file_manager()
-        headers = self._file_manager_headers()
+        api_base, headers = self._transfer_file_manager(environment)
+        download_targets = None
+        if self.use_fava:
+            active_group = self._default_group_id(api_base, headers)
+            download_targets = {
+                (str(item.get("groupId") or active_group), str(item["id"])): in_fava
+                for item, in_fava in self._download_items(api_base, headers, active_group)
+                if item.get("directory") is not True and item.get("id")
+            }
         connection = open_state(self.profile_dir.parent / "state.db")
         downloaded = skipped = failed = 0
         try:
             for record in records:
-                if cancelled is not None and cancelled.is_set():
+                if self.transfers_paused.is_set() or (cancelled is not None and cancelled.is_set()):
                     break
                 try:
                     parsed = parse_transfer_name(str(record.get("remote_name") or ""))
@@ -609,12 +764,18 @@ class BrowserSession:
                     group_id = str(record.get("group_id") or "")
                     if not remote_id or not group_id:
                         raise ValueError("شناسه فایل دانلودی ناقص است.")
+                    target = (group_id, remote_id)
+                    if download_targets is not None and target not in download_targets:
+                        raise ValueError("فایل در فهرست تأییدشده مدیریت فایل پیدا نشد.")
                     if downloaded_remote_id_exists(connection, remote_id):
                         skipped += 1
                         self._emit("info", f"قبلاً دانلود شده و نادیده گرفته شد: {parsed[1]}")
                         continue
+                    endpoint = "File/DownloadFile"
+                    if environment == "thinclient" and download_targets and download_targets[target]:
+                        endpoint = "File/DownloadFileStream"
                     response = self.context.request.get(
-                        DOWNLOAD_URL,
+                        api_base + endpoint,
                         headers=headers,
                         max_redirects=0,
                         params={"fileId": remote_id, "groupId": group_id},
@@ -668,7 +829,7 @@ class BrowserSession:
         cancelled: threading.Event | None = None,
     ) -> dict:
         empty = {"downloaded": 0, "skipped": 0, "failed": 0}
-        if cancelled is not None and cancelled.is_set():
+        if self.transfers_paused.is_set() or (cancelled is not None and cancelled.is_set()):
             return empty
         if allow_same_origin:
             records = self.list_downloadable_files(

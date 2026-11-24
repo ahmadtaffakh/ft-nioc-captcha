@@ -151,6 +151,7 @@ def add_tooltip(widget, text: str, delay_ms: int = 500) -> None:
 
 
 class CaptchaLabApp:
+    transfers_paused = False
     def __init__(self, root: tk.Tk, *, office_mode: bool = False):
         self.root = root
         apply_app_icon(root)
@@ -167,7 +168,7 @@ class CaptchaLabApp:
         self.callbacks = {}
         self.active_tasks = set()
         self.queued_browser_tasks = set()
-        self.browser = BrowserSession(self.base_dir / "browser-profile", self.results)
+        self.browser = BrowserSession(self.base_dir / "browser-profile", self.results, use_fava=True)
         self.current_image = None
         self.preview_reference = None
         self.closing = False
@@ -329,6 +330,21 @@ class CaptchaLabApp:
             status_bar, mode="indeterminate", length=80
         )
         self.status_progress.grid(row=0, column=0, sticky="w")
+        transfer_actions = ttk.Frame(status_bar)
+        transfer_actions.grid(row=3, column=0, columnspan=3, sticky="e", pady=(5, 0))
+        self.pause_transfers_button = self._button(
+            transfer_actions, "توقف", self._pause_transfers,
+            "آپلود و دانلود پس از پایان فایل جاری موقتاً متوقف می‌شوند.",
+        )
+        self.resume_transfers_button = self._button(
+            transfer_actions, "شروع مجدد", self._resume_transfers,
+            "پایش فعال آپلود و دانلود را از سر می‌گیرد.",
+        )
+        self.pause_transfers_button.grid(row=0, column=1, padx=4, sticky="ew")
+        self.resume_transfers_button.grid(row=0, column=0, padx=4, sticky="ew")
+        for column in (0, 1):
+            transfer_actions.columnconfigure(column, weight=1, uniform="transfer_actions")
+        self.resume_transfers_button.state(["disabled"])
         for row, title, value in (
             (1, "کار جاری:", self.current_work),
             (2, "آخرین پیام:", self.status),
@@ -1034,7 +1050,12 @@ class CaptchaLabApp:
         )
         download_actions = ttk.Frame(card, style="Card.TFrame")
         download_actions.grid(row=6, column=0, columnspan=3, sticky="e", padx=8, pady=(0, 6))
-        download_actions.columnconfigure((0, 1), weight=1, uniform="download_actions")
+        download_actions.columnconfigure((0, 1, 2), weight=1, uniform="download_actions")
+        self._button(
+            download_actions, "حذف فایل‌های ابری فاوا", self._preview_fava_cleanup,
+            "تعداد فایل‌های مستقیم پوشه فاوا را در تین‌کلاینت پیش از حذف نشان می‌دهد.",
+            "Danger.TButton",
+        ).grid(row=0, column=2, sticky="ew", padx=4)
         self._button(
             download_actions, "شروع دانلود", self._start_auto_download,
             "دانلود خودکار را آغاز یا از سر می‌گیرد.", "Primary.TButton",
@@ -1140,7 +1161,40 @@ class CaptchaLabApp:
             )
         self.status.set(f"{len(records)} فایل قابل دانلود پیدا شد.")
 
+    def _preview_fava_cleanup(self):
+        if self._environment_code() != "thinclient":
+            messagebox.showerror("خطا", "حذف فایل‌های ابری فاوا فقط در تین‌کلاینت در دسترس است.")
+            return
+        self._submit(
+            "preview_fava_cleanup", self.browser.preview_fava_cleanup,
+            success=self._confirm_fava_cleanup,
+        )
+
+    def _confirm_fava_cleanup(self, preview):
+        count = len(preview[2])
+        if not count:
+            message = "فایلی برای حذف در پوشه ابری فاوا پیدا نشد."
+            self.status.set(message)
+            self._log("info", message)
+            return
+        if messagebox.askyesno(
+            "تأیید حذف فایل‌های ابری",
+            f"آیا {count} فایل داخل پوشه ابری فاوا حذف شوند؟",
+            parent=self.root,
+        ) and self._environment_code() == "thinclient":
+            self._submit(
+                "delete_fava_files", self.browser.delete_fava_files, preview,
+                success=self._after_fava_cleanup,
+            )
+
+    def _after_fava_cleanup(self, count):
+        message = f"{count} فایل از پوشه ابری فاوا حذف شد."
+        self.status.set(message)
+        self._log("success", message)
+
     def _download_selected(self):
+        if self.transfers_paused:
+            return
         environment = self._environment_code()
         if not environment:
             messagebox.showerror("خطا", "ابتدا محیط اجرا را مشخص کنید.")
@@ -1179,6 +1233,32 @@ class CaptchaLabApp:
         )
         self.status.set(message)
         self._log("success" if not result["failed"] else "warning", message)
+
+    def _pause_transfers(self):
+        self.transfers_paused = True
+        self.browser.transfers_paused.set()
+        self.pause_transfers_button.state(["disabled"])
+        self.resume_transfers_button.state(["!disabled"])
+        message = "آپلود و دانلود پس از پایان فایل جاری متوقف می‌شوند."
+        self.status.set(message)
+        self._log("info", message)
+        self._sync_activity_status()
+
+    def _resume_transfers(self):
+        self.transfers_paused = False
+        self.browser.transfers_paused.clear()
+        self.pause_transfers_button.state(["!disabled"])
+        self.resume_transfers_button.state(["disabled"])
+        message = "توقف موقت آپلود و دانلود برداشته شد."
+        self.status.set(message)
+        self._log("info", message)
+        self._sync_activity_status()
+        if self.auto_upload_enabled.get() and not self.auto_upload_suspended:
+            self._upload_folder(automatic=True)
+        if not self.auto_download_suspended and (
+            self.auto_download_enabled.get() or self._same_origin_download_enabled()
+        ):
+            self._download_available(automatic=True)
 
     def _download_interval_ms(self):
         try:
@@ -1223,6 +1303,8 @@ class CaptchaLabApp:
         self.root.after(self._download_interval_ms(), self._auto_download_tick)
 
     def _download_available(self, automatic=False):
+        if self.transfers_paused:
+            return
         if self.download_task_id is not None:
             return
         environment = self._environment_code()
@@ -1287,6 +1369,8 @@ class CaptchaLabApp:
         self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
 
     def _upload_folder(self, automatic=False):
+        if self.transfers_paused:
+            return
         if self.upload_task_id is not None:
             if not automatic:
                 self._log("info", "یک عملیات آپلود در حال اجرا است؛ درخواست تکراری نادیده گرفته شد.")
@@ -1328,13 +1412,15 @@ class CaptchaLabApp:
         if not automatic:
             self.notebook.select(self.output_tab)
         operation = "auto_upload_folder" if automatic else "upload_folder"
+
+        def upload():
+            return self.browser.upload_folder(
+                folder, max_files, max_size, environment, automatic=automatic
+            )
+
         self.upload_task_id = self._submit(
             operation,
-            self.browser.upload_folder,
-            folder,
-            max_files,
-            max_size,
-            environment,
+            upload,
             announce=not automatic,
         )
 
@@ -1445,7 +1531,12 @@ class CaptchaLabApp:
         active = getattr(self, "active_tasks", set())
         queued = getattr(self, "queued_browser_tasks", set())
         busy = bool(active)
-        self.activity_status.set("در حال اجرا" if busy else "آماده")
+        if busy:
+            self.activity_status.set("در حال اجرا")
+        elif self.transfers_paused:
+            self.activity_status.set("آپلود و دانلود متوقف")
+        else:
+            self.activity_status.set("آماده")
         if hasattr(self, "current_work"):
             running = active - queued
             labels = [TASK_LABELS.get(task.rsplit("-", 1)[0], task) for task in sorted(running)]

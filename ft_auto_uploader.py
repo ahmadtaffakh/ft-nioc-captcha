@@ -33,6 +33,7 @@ FILE_MANAGER_URL = (
 QUARANTINE_URL = BASE_URL + "sarp-api/api/Scan/GetAllQuarantinedFilesList"
 QUEUE_URL = BASE_URL + "sarp-api/api/Scan/QueueForUploadFileFromQuarantineToSaman"
 UPLOAD_RESPONSE_SUFFIX = "/sarp-api/api/Scan/UploadFile"
+INTRANET_UPLOAD_RESPONSE_SUFFIX = "/filemanager-api/api/v1/File/AddCustomFile"
 TEMP_SUFFIXES = {".crdownload", ".part", ".tmp"}
 NETWORK_DEBUG_NAME = "last-upload-network.console.txt"
 
@@ -476,15 +477,26 @@ def _upload_file(page, path: Path, environment: str) -> str:
         file_chooser_info.value.set_files(str(staged))
 
         responses = []
+        upload_suffixes = (UPLOAD_RESPONSE_SUFFIX,)
+        if environment == "intranet":
+            upload_suffixes += (INTRANET_UPLOAD_RESPONSE_SUFFIX,)
 
         def uploaded(response):
-            if response.url.split("?", 1)[0].endswith(UPLOAD_RESPONSE_SUFFIX) and response.request.method == "POST":
+            if (
+                response.request.method == "POST"
+                and response.url.split("?", 1)[0].endswith(upload_suffixes)
+            ):
                 responses.append(response)
 
         page.on("response", uploaded)
         try:
+            confirmation_name = (
+                re.compile(r"^(?:بارگ[ذز]ار[یي]|اسکن)$")
+                if environment == "intranet"
+                else "اسکن"
+            )
             page.locator("div.v-dialog:visible").get_by_role(
-                "button", name="اسکن", exact=True
+                "button", name=confirmation_name, exact=True
             ).click()
             deadline = time.monotonic() + 120
             rejected = page.get_by_text(re.compile(r"پسوند\s+فایل.*مجاز\s+نمی\s*باشد")).first
@@ -504,7 +516,14 @@ def _upload_file(page, path: Path, environment: str) -> str:
     )
     if not response.ok:
         raise RuntimeError(f"Upload failed with HTTP {response.status}")
-    scan_file_id = response.json().get("scanFileId")
+    payload = response.json()
+    if response.url.split("?", 1)[0].endswith(INTRANET_UPLOAD_RESPONSE_SUFFIX):
+        if not isinstance(payload, dict) or payload.get("isSuccess") is not True:
+            raise RuntimeError("سرویس اینترانت موفقیت آپلود را تأیید نکرد.")
+        raise RuntimeError(
+            "سرویس اینترانت دریافت فایل را تأیید کرد، اما سلامت اسکن و ثبت در صف نهایی تأیید نشد."
+        )
+    scan_file_id = payload.get("scanFileId")
     if not scan_file_id:
         raise RuntimeError("Upload response did not contain scanFileId")
     return scan_file_id
