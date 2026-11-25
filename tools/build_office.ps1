@@ -10,7 +10,7 @@ if ([IO.Path]::GetFileName($resolvedModel) -ne "captcha_model.ftmodel") {
     throw "ModelPath must point to captcha_model.ftmodel."
 }
 $driveRoot = [IO.Path]::GetPathRoot($projectRoot)
-$workPath = Join-Path $driveRoot "ft-office-pyinstaller-work"
+$workPath = Join-Path $projectRoot "build\ft-office-pyinstaller-work"
 $distPath = Join-Path $projectRoot "dist"
 $packagePath = Join-Path $distPath "FT-Office-Lite"
 $archivePath = Join-Path $distPath "FT-Office-Lite.zip"
@@ -25,6 +25,7 @@ if (-not $SkipTests) {
         tests.test_ft_auto_uploader `
         tests.test_ft_browser `
         tests.test_ft_settings `
+        tests.test_ft_pargar `
         -v
     if ($LASTEXITCODE -ne 0) {
         throw "Office tests failed."

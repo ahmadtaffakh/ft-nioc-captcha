@@ -921,7 +921,7 @@ class OrganizationalUiTest(unittest.TestCase):
     def test_status_bar_distinguishes_running_from_last_status(self):
         self.assertEqual(self.app.activity_status.get(), "آماده")
         self.assertEqual(self.app.status.get(), "آماده")
-        self.assertEqual(self.app.status_progress.master.grid_size()[1], 3)
+        self.assertEqual(self.app.status_progress.master.grid_size()[1], 4)
 
         task_id = "auto_download_files-1"
         self.app.queued_browser_tasks.add(task_id)

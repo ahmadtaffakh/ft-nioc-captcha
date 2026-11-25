@@ -11,8 +11,8 @@ from pathlib import Path
 from ctypes import wintypes
 
 
-APP_VERSION = "0.7.1"
-OFFICE_VERSION = "0.7.2"
+APP_VERSION = "0.7.2"
+OFFICE_VERSION = "0.7.3"
 SETTINGS_FILENAME = "settings.json"
 CREDENTIALS_FILENAME = "credentials.dat"
 PARGAR_CREDENTIALS_FILENAME = "pargar-credentials.dat"
