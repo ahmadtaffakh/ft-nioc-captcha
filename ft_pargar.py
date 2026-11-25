@@ -43,6 +43,8 @@ class PargarClient:
         if not self.username or not self.token:
             raise PargarError("نام کاربری و API Token پرگار را وارد کنید.")
         self._base_path = parsed.path.rstrip("/")
+        if self._base_path.casefold().endswith("/mailbox.api"):
+            self._base_path = self._base_path.rsplit("/", 1)[0]
         self._origin = f"{parsed.scheme}://{parsed.netloc}"
         raw = f"{self.username}:{self.token}".encode("utf-8")
         self._authorization = "Basic " + base64.b64encode(raw).decode("ascii")
@@ -64,7 +66,8 @@ class PargarClient:
         except urllib.error.HTTPError as error:
             if error.code == 401:
                 raise PargarError("احراز هویت پرگار ناموفق بود؛ نام کاربری یا توکن را بررسی کنید.") from error
-            raise PargarError(f"پرگار پاسخ HTTP {error.code} برگرداند.") from error
+            endpoint = urllib.parse.urlsplit(request.full_url).path
+            raise PargarError(f"پرگار برای مسیر {endpoint} پاسخ HTTP {error.code} برگرداند.") from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise PargarError(f"ارتباط با پرگار برقرار نشد: {error}") from error
         except (UnicodeError, json.JSONDecodeError) as error:
@@ -78,8 +81,8 @@ class PargarClient:
 
     def candidates(self, *, sender: bool = False) -> list[dict]:
         relative = (
-            "mailbox.Api/v0/messages/GetCurrentUserSenderContacts"
-            if sender else "mailbox.Api/v0/messages/MessageReceivingCandidates"
+            "Mailbox.api/v0/messages/GetCurrentUserSenderContacts"
+            if sender else "Mailbox.api/v0/messages/MessageReceivingCandidates"
         )
         page = 0
         results = []
@@ -162,7 +165,7 @@ class PargarClient:
             f"Content-Type: {mime}\r\n\r\n"
         ).encode("ascii")
         suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
-        parsed = urllib.parse.urlsplit(self._url("mailbox.Api/v0/messages/sendmail"))
+        parsed = urllib.parse.urlsplit(self._url("Mailbox.api/v0/messages/sendmail"))
         connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         connection = connection_type(parsed.hostname, parsed.port, timeout=self.timeout)
         request_started = False
