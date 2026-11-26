@@ -433,14 +433,25 @@ class BrowserSession:
         validate_environment(environment)
         self._ensure_file_manager(login_timeout_minutes)
         if self.use_fava:
+            group_id = None
             try:
                 api_base, headers = self._transfer_file_manager(environment)
-                group_id = self._default_group_id(api_base, headers)
-                folder_id = self._fava_folder_id(headers, group_id, create=True, api_base=api_base)
+                root_items = None
+                if environment == "intranet":
+                    group_id, root = self._open_upload_root()
+                    if root.get("totalCount", 0) <= len(root["items"]):
+                        root_items = root["items"]
+                else:
+                    group_id = self._default_group_id(api_base, headers)
+                folder_id = self._fava_folder_id(
+                    headers, group_id, create=True, api_base=api_base, root_items=root_items
+                )
                 self._open_fava_folder(folder_id, group_id)
             except Exception as error:
                 self._emit("warning", f"پوشه فاوا در دسترس نیست. آپلود از ریشه ادامه می‌یابد. {error}")
-                if self.page.url != FILE_MANAGER_URL:
+                if environment == "intranet" and (group_id is None or self.page.url != FILE_MANAGER_URL):
+                    self._open_upload_root()
+                elif self.page.url != FILE_MANAGER_URL:
                     self.page.goto(FILE_MANAGER_URL, wait_until="domcontentloaded")
                 self._ensure_file_manager(login_timeout_minutes)
                 if self.page.url != FILE_MANAGER_URL:
@@ -457,7 +468,7 @@ class BrowserSession:
                     break
                 processed += 1
                 try:
-                    process_file(
+                    outcome = process_file(
                         connection,
                         self.context,
                         self.page,
@@ -467,7 +478,10 @@ class BrowserSession:
                         self._emit,
                         environment,
                     )
-                    failures.pop(path, None)
+                    if outcome in {"downloaded", "upload_pending", "queue_pending", "rejected", "unknown", "unsupported"}:
+                        failures[path] = signatures[path]
+                    else:
+                        failures.pop(path, None)
                     consecutive_failures = 0
                 except Exception as error:
                     failures[path] = signatures[path]
@@ -562,8 +576,14 @@ class BrowserSession:
                 return
             page_index += 1
 
+    def _open_upload_root(self):
+        return self._open_upload_listing(FILE_MANAGER_URL)
+
     def _open_fava_folder(self, folder_id: str, group_id: str) -> None:
         folder_url = f"{FILE_MANAGER_URL.rsplit('/', 1)[0]}/{folder_id}"
+        self._open_upload_listing(folder_url, folder_id, group_id)
+
+    def _open_upload_listing(self, url, folder_id=None, group_id=None):
         listing_urls = {
             base + "File/GetFilesAndFolders"
             for base in (FILE_MANAGER_API, INTRANET_FILE_MANAGER_API)
@@ -576,15 +596,18 @@ class BrowserSession:
             body = request.post_data_json
             return (
                 isinstance(body, dict)
-                and body.get("parentId") == folder_id
-                and body.get("groupId") == group_id
+                and (body.get("parentId") or None) == folder_id
+                and isinstance(body.get("groupId"), str)
+                and bool(body["groupId"])
+                and (group_id is None or body["groupId"] == group_id)
             )
 
         with self.page.expect_response(lists_target_folder, timeout=8_000) as listing:
-            self.page.goto(folder_url, wait_until="domcontentloaded")
-        data = self._response_data(listing.value, "باز کردن پوشه فاوا")
-        if self.page.url != folder_url or not isinstance(data, dict) or not isinstance(data.get("items"), list):
-            raise RuntimeError("باز شدن مسیر پوشه فاوا قابل تأیید نیست.")
+            self.page.goto(url, wait_until="domcontentloaded")
+        data = self._response_data(listing.value, "باز کردن فهرست مدیریت فایل")
+        if self.page.url != url or not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise RuntimeError("باز شدن مسیر مدیریت فایل قابل تأیید نیست.")
+        return listing.value.request.post_data_json["groupId"], data
 
     def _fava_folder_id(self, headers, group_id, *, create, api_base=FILE_MANAGER_API, root_items=None):
         def find(items):

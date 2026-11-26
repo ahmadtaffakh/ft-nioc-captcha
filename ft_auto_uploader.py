@@ -460,6 +460,7 @@ def upload_file(page, path: Path, environment: str) -> str:
     try:
         return _upload_file(page, path, environment)
     except Exception as upload_error:
+        cancel = None
         try:
             cancel = page.locator("div.v-dialog:visible").get_by_role(
                 "button", name="انصراف", exact=True
@@ -468,6 +469,8 @@ def upload_file(page, path: Path, environment: str) -> str:
                 cancel.click(timeout=5_000)
                 cancel.wait_for(state="hidden", timeout=5_000)
         except Exception as cleanup_error:
+            if cancel is not None and not cancel.is_visible():
+                raise upload_error from None
             raise RuntimeError(
                 f"خطای اصلی آپلود ({type(upload_error).__name__}): {upload_error}\n"
                 f"خطای بستن پنجرهٔ آپلود ({type(cleanup_error).__name__}): {cleanup_error}"
@@ -606,12 +609,22 @@ def process_file(
         archived = archive_file(path, archive_dir)
         _report(emit, "success", f"قبلاً ارسال شده؛ بایگانی شد: {archived.name}")
         return "queued"
-    if row and row[1] in {"rejected", "unknown", "unsupported"}:
+    if row and row[1] in {"rejected", "unknown", "unsupported", "upload_pending"}:
         _report(emit, "warning", f"نتیجه قبلی «{row[1]}» است؛ رد شد: {path.name}")
         return row[1]
 
     scan_file_id = row[0] if row else None
     if not scan_file_id:
+        claim = connection.execute(
+            """
+            INSERT OR IGNORE INTO uploads (fingerprint, source_path, status, updated_at)
+            VALUES (?, ?, 'upload_pending', ?)
+            """,
+            (file_hash, str(path), int(time.time())),
+        )
+        connection.commit()
+        if claim.rowcount != 1:
+            return "upload_pending"
         try:
             scan_file_id = upload_file(page, path, environment)
         except UnsupportedUploadError:
@@ -623,6 +636,15 @@ def process_file(
 
     result, item = wait_for_scan(context.request, scan_file_id, scan_timeout)
     if result == "clean":
+        claim = connection.execute(
+            "UPDATE uploads SET status = 'queue_pending', updated_at = ? "
+            "WHERE fingerprint = ? AND status = 'uploaded'",
+            (int(time.time()), file_hash),
+        )
+        connection.commit()
+        if claim.rowcount != 1:
+            _report(emit, "warning", f"ثبت قبلی در صف نیازمند بررسی است: {path.name}")
+            return "queue_pending"
         queue_clean_file(context.request, item)
         save_state(connection, file_hash, path, scan_file_id, "queued")
         archived = archive_file(path, archive_dir)

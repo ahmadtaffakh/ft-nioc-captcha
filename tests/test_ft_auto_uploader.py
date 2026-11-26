@@ -171,6 +171,34 @@ class ScanResultTest(unittest.TestCase):
 
 
 class UploadInteractionTest(unittest.TestCase):
+    def test_ambiguous_upload_is_not_retried_after_restart_and_rename(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            source = folder / "first.xlsx"
+            source.write_bytes(b"same contents")
+            database = folder / "state.db"
+            with (
+                patch("ft_auto_uploader._write_network_debug"),
+                patch("ft_auto_uploader.upload_file", side_effect=RuntimeError("no scan ID")) as upload,
+                patch("ft_auto_uploader.wait_for_scan") as scan,
+            ):
+                connection = open_state(database)
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "no scan ID"):
+                        process_file(connection, Mock(), Mock(), source, folder / "_uploaded", 30, Mock(), "intranet")
+                finally:
+                    connection.close()
+                renamed = source.rename(folder / "renamed.xlsx")
+                connection = open_state(database)
+                try:
+                    outcome = process_file(connection, Mock(), Mock(), renamed, folder / "_uploaded", 30, Mock(), "intranet")
+                finally:
+                    connection.close()
+                self.assertEqual(outcome, "upload_pending")
+                upload.assert_called_once()
+                scan.assert_not_called()
+                self.assertTrue(renamed.exists())
+
     def test_unsupported_extension_is_skipped_without_repeating_upload(self):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
