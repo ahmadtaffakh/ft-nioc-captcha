@@ -195,6 +195,29 @@ class BatchCaptureTest(unittest.TestCase):
         app._download_available(automatic=True)
         app.browser.download_available_files.assert_not_called()
 
+    def test_automatic_transfer_errors_clear_tasks_without_suspending_polling(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.root = Mock()
+        app.status = Mock()
+        app._log = Mock()
+        app.callbacks = {}
+        app.results = queue.Queue()
+        app.upload_task_id = "upload"
+        app.download_task_id = "download"
+        app.auto_upload_suspended = False
+        app.auto_download_suspended = False
+        app.results.put(RuntimeResult("download", "auto_download_files", False, "network error"))
+        app.results.put(RuntimeResult("upload", "auto_upload_folder", True, {
+            "processed": 0, "failed": 2, "oversized": 0, "stopped": True,
+        }))
+
+        app._poll_results()
+
+        self.assertIsNone(app.upload_task_id)
+        self.assertIsNone(app.download_task_id)
+        self.assertFalse(app.auto_upload_suspended)
+        self.assertFalse(app.auto_download_suspended)
+
     def test_thinclient_test_mode_starts_and_repeats_downloads(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
         app.root = Mock()

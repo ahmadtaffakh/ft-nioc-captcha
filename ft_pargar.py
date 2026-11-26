@@ -79,7 +79,7 @@ class PargarClient:
     def test_connection(self) -> None:
         self._get_json("inf.Api/v0/Authentication/Authenticate")
 
-    def candidates(self, *, sender: bool = False) -> list[dict]:
+    def candidates(self, *, sender: bool = False, search: str = "") -> list[dict]:
         relative = (
             "Mailbox.api/v0/messages/GetCurrentUserSenderContacts"
             if sender else "Mailbox.api/v0/messages/MessageReceivingCandidates"
@@ -88,7 +88,7 @@ class PargarClient:
         results = []
         while page < 100:
             payload = self._get_json(
-                relative, {"searchterm": "", "pageSize": 100, "pageNum": page}
+                relative, {"searchText" if sender else "searchterm": search.strip(), "pageSize": 100, "pageNum": page}
             )
             entities = payload.get("Entities", []) if isinstance(payload, dict) else []
             if not isinstance(entities, list):
@@ -257,6 +257,38 @@ class PargarFolderMonitor:
 
     def stop(self):
         self._stop.set()
+
+    def send_test_zip(self, path, client, sender, receivers, message):
+        if path.suffix.lower() != ".zip" or not zipfile.is_zipfile(path):
+            raise PargarError("یک فایل ZIP معتبر انتخاب کنید.")
+        digest = fingerprint(path)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        db = _state_db(self.data_dir / "pargar-state.sqlite3")
+        try:
+            with db:
+                claim = db.execute(
+                    "INSERT INTO messages(hash,source_path,status,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(hash) DO UPDATE SET source_path=excluded.source_path, "
+                    "status=excluded.status, updated_at=excluded.updated_at WHERE messages.status='failed'",
+                    (digest, str(path), "sending", time.time()),
+                )
+                if not claim.rowcount:
+                    raise PargarError("این فایل قبلاً ارسال شده یا وضعیت ارسال قبلی آن نیاز به بررسی دارد.")
+            try:
+                result = client.send_file(path, sender, receivers, message, expected_sha256=digest)
+            except Exception as error:
+                status = "ambiguous" if isinstance(error, AmbiguousSendError) else "failed"
+                with db:
+                    db.execute("UPDATE messages SET status=?,updated_at=? WHERE hash=?",
+                               (status, time.time(), digest))
+                raise
+            mail_id = str(result["MailId"])
+            with db:
+                db.execute("UPDATE messages SET status='sent',mail_id=?,updated_at=? WHERE hash=?",
+                           (mail_id, time.time(), digest))
+            return mail_id
+        finally:
+            db.close()
 
     def _run(self, folder, client, sender, receivers, template, interval, process_existing):
         self.data_dir.mkdir(parents=True, exist_ok=True)

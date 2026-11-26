@@ -14,7 +14,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from app_icon import apply_app_icon
 from captcha_training import (
@@ -892,6 +892,13 @@ class CaptchaLabApp:
         contacts.columnconfigure(0, weight=1)
         contacts.columnconfigure(1, weight=1)
         contacts.rowconfigure(1, weight=1)
+        search = ttk.Frame(contacts)
+        search.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Label(search, text="نام گیرنده").pack(side="right", padx=4)
+        self.pargar_recipient_search = ttk.Entry(search, justify="right")
+        self.pargar_recipient_search.pack(side="right", fill="x", expand=True, padx=4)
+        self._button(search, "جست‌وجوی گیرنده", self._test_pargar_connection,
+                     "نام گیرنده را در پرگار جست‌وجو کنید. کادر خالی، مخاطبان منتخب را نشان می‌دهد.").pack(side="right")
 
         message = ttk.LabelFrame(self.pargar_tab, text="پیام ارسالی", style="Card.TLabelframe", padding=10)
         message.pack(fill="x", pady=8)
@@ -909,6 +916,11 @@ class CaptchaLabApp:
         self.pargar_stop_button.pack(side="right", padx=4)
         self.pargar_stop_button.state(["disabled"])
         ttk.Label(actions, textvariable=self.pargar_monitor_status, style="StatusMuted.TLabel").pack(side="left", padx=8)
+        test_actions = ttk.Frame(self.pargar_tab)
+        test_actions.pack(fill="x", pady=4)
+        self._button(test_actions, "ارسال آزمایشی ZIP", self._send_pargar_test_zip,
+                     "فایل ZIP و متن دلخواه را با فرستنده و گیرندگان انتخاب‌شده واقعاً ارسال می‌کند."
+                     ).pack(side="right", padx=4)
 
     def _pargar_selection_changed(self, _event=None):
         if not self.pargar_sender_labels and not self.pargar_recipient_labels:
@@ -973,10 +985,12 @@ class CaptchaLabApp:
         except (ValueError, PargarError) as error:
             messagebox.showerror("تنظیمات پرگار", str(error))
             return
+        search = self.pargar_recipient_search.get().strip()
+
         def check():
             client.test_connection()
             senders = client.candidates(sender=True)
-            recipients = client.candidates()
+            recipients = client.candidates(search=search) if search else client.candidates()
             return senders, recipients
         self._submit_pargar("pargar_connection_test", check, success=self._show_pargar_candidates)
 
@@ -1019,11 +1033,52 @@ class CaptchaLabApp:
         if folder:
             self.pargar_watch_dir.set(folder)
 
-    def _persist_pargar_contacts(self):
+    def _send_pargar_test_zip(self):
+        title = "ارسال آزمایشی ZIP"
+        if self.pargar_monitor.running or self._pargar_test_send_pending():
+            messagebox.showinfo(title, "ابتدا صبر کنید تا پایش یا ارسال فعلی پایان یابد.")
+            return
+        try:
+            sender, receivers = self._selected_pargar_contacts()
+            if not sender or not receivers:
+                raise ValueError("یک فرستنده و حداقل یک گیرنده انتخاب کنید.")
+            client = self._pargar_client()
+        except (ValueError, PargarError) as error:
+            messagebox.showerror(title, str(error))
+            return
+        selected = filedialog.askopenfilename(title=title, filetypes=[("ZIP", "*.zip")])
+        if not selected:
+            return
+        body = simpledialog.askstring(title, "متن پیام را وارد کنید.")
+        if not body or not body.strip():
+            return
+        path = Path(selected)
+        recipients = ", ".join(str(item.get("text") or item.get("Name") or item.get("id"))
+                               for item in receivers)
+        if not messagebox.askyesno(title, f"فایل {path.name} واقعاً برای این گیرندگان ارسال شود؟\n{recipients}"):
+            return
+        self._submit_pargar(
+            "pargar_test_send", self.pargar_monitor.send_test_zip, path, client, sender, receivers, body,
+            success=self._show_pargar_test_sent,
+        )
+
+    def _show_pargar_test_sent(self, mail_id):
+        message = f"پیام آزمایشی پرگار ارسال شد. شناسه پیام {mail_id}"
+        self._log("success", message)
+        self.status.set(message)
+
+    def _pargar_test_send_pending(self):
+        return any(task.startswith("pargar_test_send-") for task in self.queued_browser_tasks)
+
+    def _selected_pargar_contacts(self):
         sender_selection = self.pargar_sender_list.curselection()
         receiver_selection = self.pargar_recipient_list.curselection()
         sender = self.pargar_sender_labels.get(sender_selection[0]) if sender_selection else None
         receivers = [self.pargar_recipient_labels[index] for index in receiver_selection]
+        return sender, receivers
+
+    def _persist_pargar_contacts(self):
+        sender, receivers = self._selected_pargar_contacts()
         def compact(item):
             if not item:
                 return {}
@@ -1038,6 +1093,9 @@ class CaptchaLabApp:
         return sender, receivers
 
     def _start_pargar_monitor(self):
+        if self._pargar_test_send_pending():
+            messagebox.showinfo("شروع پایش پرگار", "ابتدا صبر کنید تا ارسال آزمایشی پایان یابد.")
+            return
         try:
             settings = self._current_settings()
             sender, receivers = self._persist_pargar_contacts()
@@ -1336,19 +1394,15 @@ class CaptchaLabApp:
         )
         download_actions = ttk.Frame(card, style="Card.TFrame")
         download_actions.grid(row=6, column=0, columnspan=3, sticky="e", padx=8, pady=(0, 6))
-        download_actions.columnconfigure((0, 1, 2), weight=1, uniform="download_actions")
+        download_actions.columnconfigure((0, 1), weight=1, uniform="download_actions")
         self._button(
             download_actions, "حذف فایل‌های ابری فاوا", self._preview_fava_cleanup,
             "تعداد فایل‌های مستقیم پوشه فاوا را در تین‌کلاینت پیش از حذف نشان می‌دهد.",
             "Danger.TButton",
-        ).grid(row=0, column=2, sticky="ew", padx=4)
+        ).grid(row=0, column=1, sticky="ew", padx=4)
         self._button(
             download_actions, "شروع دانلود", self._start_auto_download,
             "دانلود خودکار را آغاز یا از سر می‌گیرد.", "Primary.TButton",
-        ).grid(row=0, column=1, sticky="ew", padx=4)
-        self._button(
-            download_actions, "توقف دانلود", self._stop_auto_download,
-            "پایش خودکار را متوقف می‌کند. فایل در حال دریافت کامل می‌شود.", "Danger.TButton",
         ).grid(row=0, column=0, sticky="ew", padx=4)
         self.download_tree = ttk.Treeview(
             card,
@@ -1572,21 +1626,14 @@ class CaptchaLabApp:
         self.auto_download_warning = None
         self._download_available(automatic=True)
 
-    def _stop_auto_download(self):
-        self.auto_download_suspended = True
-        self.download_cancelled.set()
-        message = "پایش دانلود خودکار متوقف شد."
-        self.status.set(message)
-        self._log("info", message)
-
     def _auto_download_tick(self):
         if self.closing:
             return
+        self.root.after(self._download_interval_ms(), self._auto_download_tick)
         if not self.auto_download_suspended and (
             self.auto_download_enabled.get() or self._same_origin_download_enabled()
         ):
             self._download_available(automatic=True)
-        self.root.after(self._download_interval_ms(), self._auto_download_tick)
 
     def _download_available(self, automatic=False):
         if self.transfers_paused:
@@ -1650,9 +1697,9 @@ class CaptchaLabApp:
     def _auto_upload_tick(self):
         if self.closing:
             return
+        self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
         if self.auto_upload_enabled.get() and not self.auto_upload_suspended:
             self._upload_folder(automatic=True)
-        self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
 
     def _upload_folder(self, automatic=False):
         if self.transfers_paused:
@@ -2114,8 +2161,7 @@ class CaptchaLabApp:
                 self.status.set("عملیات ناموفق بود.")
                 self._log("error", f"{operation}: {payload}")
                 if operation == "auto_download_files":
-                    self.auto_download_suspended = True
-                    self.status.set("دانلود خودکار پس از خطا متوقف شد.")
+                    self.status.set("چرخهٔ دانلود ناموفق بود. پایش در نوبت بعد ادامه دارد.")
                 elif operation != "auto_upload_folder":
                     messagebox.showerror("خطا", payload)
                 continue
@@ -2173,9 +2219,9 @@ class CaptchaLabApp:
                     f"خطا: {payload['failed']}، عبور از سقف حجم: {payload['oversized']}"
                 )
                 if payload.get("stopped"):
-                    message += " — توقف پس از دو خطای پیاپی"
-                    self.auto_upload_suspended = True
-                    message += "؛ پایش خودکار متوقف شد"
+                    message += " — چرخه پس از دو خطای پیاپی پایان یافت"
+                    if operation == "auto_upload_folder":
+                        message += "؛ پایش در نوبت بعد ادامه دارد"
                 self.status.set(message)
                 self._log("success" if payload["failed"] == 0 else "warning", message)
             elif isinstance(payload, str):

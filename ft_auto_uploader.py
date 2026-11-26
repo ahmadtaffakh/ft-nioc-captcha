@@ -459,14 +459,19 @@ def wait_for_file_manager(page, login_timeout_ms: int, login_handler=None) -> No
 def upload_file(page, path: Path, environment: str) -> str:
     try:
         return _upload_file(page, path, environment)
-    except Exception:
-        # Close only the upload dialog's explicit cancel action before the next file.
-        cancel = page.locator("div.v-dialog:visible").get_by_role(
-            "button", name="انصراف", exact=True
-        )
-        if cancel.count() == 1 and cancel.is_visible():
-            cancel.click(timeout=5_000)
-            cancel.wait_for(state="hidden", timeout=5_000)
+    except Exception as upload_error:
+        try:
+            cancel = page.locator("div.v-dialog:visible").get_by_role(
+                "button", name="انصراف", exact=True
+            )
+            if cancel.count() == 1 and cancel.is_visible():
+                cancel.click(timeout=5_000)
+                cancel.wait_for(state="hidden", timeout=5_000)
+        except Exception as cleanup_error:
+            raise RuntimeError(
+                f"خطای اصلی آپلود ({type(upload_error).__name__}): {upload_error}\n"
+                f"خطای بستن پنجرهٔ آپلود ({type(cleanup_error).__name__}): {cleanup_error}"
+            ) from upload_error
         raise
 
 
