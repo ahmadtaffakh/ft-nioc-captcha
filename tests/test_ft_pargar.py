@@ -15,6 +15,7 @@ from ft_pargar import (
     PargarFolderMonitor,
     _prepare_pargar_candidate,
     _state_db,
+    inspect_pargar_folder,
     list_pargar_history,
 )
 
@@ -221,6 +222,23 @@ class PargarCmfTest(unittest.TestCase):
 
         self.assertIn("notice_id", columns)
         self.assertIn("messages_notice_hash", indexes)
+
+    def test_folder_inspection_reports_ready_and_rejected_without_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self._write_pair(folder, name="ready.zip")
+            self._write_pair(folder, name="missing-intent.zip", intent=None)
+            self._write_pair(folder, name="catalog-response.zip", intent="catalog_response")
+            (folder / "ignored.txt").write_text("ignored", encoding="utf-8")
+
+            summary = inspect_pargar_folder(folder)
+            state_created = (folder / "pargar-state.sqlite3").exists()
+
+        self.assertEqual(summary["zip_files"], 3)
+        self.assertEqual(summary["ready"], 1)
+        self.assertEqual(summary["rejected"], 2)
+        self.assertEqual(sum(summary["reasons"].values()), 2)
+        self.assertFalse(state_created)
 
     def test_monitor_uses_ui_contacts_and_cmf_message(self):
         with tempfile.TemporaryDirectory() as directory:

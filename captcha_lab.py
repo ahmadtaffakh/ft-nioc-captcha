@@ -54,6 +54,7 @@ from ft_pargar import (
     PargarClient,
     PargarError,
     PargarFolderMonitor,
+    inspect_pargar_folder,
     list_pargar_history,
 )
 
@@ -1154,6 +1155,9 @@ class CaptchaLabApp:
     def _pargar_test_send_pending(self):
         return any(task.startswith("pargar_test_send-") for task in self.queued_browser_tasks)
 
+    def _pargar_preflight_pending(self):
+        return any(task.startswith("pargar_preflight-") for task in self.queued_browser_tasks)
+
     def _selected_pargar_contacts(self):
         sender_selection = self.pargar_sender_list.curselection()
         receiver_selection = self.pargar_recipient_list.curselection()
@@ -1177,9 +1181,29 @@ class CaptchaLabApp:
         return sender, receivers
 
     def _start_pargar_monitor(self):
-        if self._pargar_test_send_pending():
-            messagebox.showinfo("شروع پایش پرگار", "ابتدا صبر کنید تا ارسال آزمایشی پایان یابد.")
+        if self._pargar_test_send_pending() or self._pargar_preflight_pending():
+            messagebox.showinfo("شروع پایش پرگار", "ابتدا صبر کنید تا عملیات جاری پرگار پایان یابد.")
             return
+        try:
+            settings = self._current_settings()
+        except (OSError, RuntimeError, ValueError) as error:
+            messagebox.showerror("شروع پایش پرگار", str(error))
+            return
+        self.pargar_monitor_status.set("در حال بررسی پوشه...")
+        self.pargar_start_button.state(["disabled"])
+        self._submit_pargar(
+            "pargar_preflight", inspect_pargar_folder, Path(settings.pargar_watch_dir),
+            success=self._after_pargar_preflight,
+        )
+
+    def _after_pargar_preflight(self, summary):
+        self._log(
+            "success" if summary["ready"] else "warning",
+            f"بررسی پوشه پرگار: {summary['zip_files']} فایل ZIP؛ "
+            f"آماده ارسال: {summary['ready']}، ردشده: {summary['rejected']}",
+        )
+        for reason, count in summary["reasons"].items():
+            self._log("warning", f"ردشده ({count} فایل): {reason}")
         try:
             settings = self._current_settings()
             sender, receivers = self._persist_pargar_contacts()
@@ -1196,6 +1220,7 @@ class CaptchaLabApp:
             )
         except (OSError, RuntimeError, ValueError) as error:
             messagebox.showerror("شروع پایش پرگار", str(error))
+            self.pargar_monitor_status.set("پایش شروع نشد.")
             return
         self.pargar_monitor_status.set("پایش فعال است.")
         self.pargar_start_button.state(["disabled"])
@@ -1207,7 +1232,7 @@ class CaptchaLabApp:
         self.pargar_stop_button.state(["disabled"])
 
     def _refresh_pargar_monitor_ui(self):
-        if not self.pargar_monitor.running:
+        if not self.pargar_monitor.running and not self._pargar_preflight_pending():
             self.pargar_monitor_status.set("پایش متوقف است.")
             self.pargar_start_button.state(["!disabled"])
             self.pargar_stop_button.state(["disabled"])

@@ -311,6 +311,36 @@ def _prepare_pargar_candidate(path: Path) -> dict:
     }
 
 
+def inspect_pargar_folder(folder: Path) -> dict:
+    """Read and validate top-level Pargar ZIP candidates without changing state."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise PargarError("پوشه انتخاب‌شده وجود ندارد یا قابل‌دسترسی نیست.")
+    summary = {"zip_files": 0, "ready": 0, "rejected": 0, "reasons": {}}
+    try:
+        paths = list(folder.iterdir())
+    except OSError as error:
+        raise PargarError(f"خواندن پوشه پرگار ممکن نیست: {error}") from error
+    for path in paths:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.suffix.lower() != ".zip"
+            or path.name.lower().endswith(TEMP_SUFFIXES)
+        ):
+            continue
+        summary["zip_files"] += 1
+        try:
+            _prepare_pargar_candidate(path)
+        except (OSError, PargarError) as error:
+            detail = str(error)
+            summary["rejected"] += 1
+            summary["reasons"][detail] = summary["reasons"].get(detail, 0) + 1
+        else:
+            summary["ready"] += 1
+    return summary
+
+
 def list_pargar_history(data_dir: Path) -> list[tuple]:
     """Return Pargar-only delivery history, newest first."""
     database_path = Path(data_dir) / "pargar-state.sqlite3"

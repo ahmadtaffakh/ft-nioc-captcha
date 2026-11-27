@@ -69,6 +69,25 @@ class CaptchaCaptureTest(unittest.TestCase):
 
 
 class BatchCaptureTest(unittest.TestCase):
+    def test_pargar_preflight_runs_before_connection_validation(self):
+        from ft_settings import AppSettings
+
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.queued_browser_tasks = set()
+        app._current_settings = Mock(return_value=AppSettings(pargar_watch_dir="incoming"))
+        app.pargar_monitor_status = Mock()
+        app.pargar_start_button = Mock()
+        app._submit_pargar = Mock()
+
+        app._start_pargar_monitor()
+
+        operation, function, folder = app._submit_pargar.call_args.args
+        self.assertEqual(operation, "pargar_preflight")
+        self.assertEqual(function.__name__, "inspect_pargar_folder")
+        self.assertEqual(folder, Path("incoming"))
+        self.assertIs(app._submit_pargar.call_args.kwargs["success"].__self__, app)
+        app.pargar_monitor_status.set.assert_called_once_with("در حال بررسی پوشه...")
+
     def test_failed_automatic_login_waits_for_manual_login(self):
         session = BrowserSession(Path("profile"), queue.Queue())
         session.login = Mock(side_effect=RuntimeError("login failed"))
