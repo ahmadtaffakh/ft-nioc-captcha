@@ -2335,6 +2335,8 @@ class CaptchaLabApp:
                 self._log("error", f"{operation}: {payload}")
                 if operation == "auto_download_files":
                     self.status.set("چرخهٔ دانلود ناموفق بود. پایش در نوبت بعد ادامه دارد.")
+                elif operation == "login":
+                    self.status.set("ورود FT ناموفق بود؛ پایش پرگار مستقل ادامه دارد.")
                 elif operation != "auto_upload_folder":
                     messagebox.showerror("خطا", payload)
                 continue

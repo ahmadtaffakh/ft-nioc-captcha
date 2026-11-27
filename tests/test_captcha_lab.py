@@ -134,6 +134,31 @@ class BatchCaptureTest(unittest.TestCase):
         app.status.set.assert_called_once_with(message)
         app._log.assert_called_once_with("success", message)
 
+    def test_failed_ft_login_does_not_block_or_stop_pargar_monitor(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.results = queue.Queue()
+        app.results.put(RuntimeResult("login-1", "login", False, "network error"))
+        app.callbacks = {}
+        app.active_tasks = {"login-1"}
+        app.queued_browser_tasks = set()
+        app.upload_task_id = None
+        app.download_task_id = None
+        app.status = Mock()
+        app._log = Mock()
+        app._sync_activity_status = Mock()
+        app.pargar_monitor = Mock()
+        app.root = Mock()
+
+        with patch("captcha_lab.messagebox.showerror") as showerror:
+            app._poll_results()
+
+        showerror.assert_not_called()
+        app.pargar_monitor.stop.assert_not_called()
+        app.status.set.assert_any_call(
+            "ورود FT ناموفق بود؛ پایش پرگار مستقل ادامه دارد."
+        )
+        app._log.assert_called_once_with("error", "login: network error")
+
     def test_upload_history_reports_each_status(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
         app._log = Mock()
