@@ -918,6 +918,7 @@ class OrganizationalUiTest(unittest.TestCase):
                 "داده و آموزش",
                 "خروجی و گزارش",
                 "پرگار",
+                "تاریخچه پرگار",
             ],
         )
         nested = self.app.transfer_notebook
@@ -996,6 +997,21 @@ class OrganizationalUiTest(unittest.TestCase):
         self.assertEqual(self.app.output.cget("background"), "#111827")
         self.assertEqual(self.app.output.tag_cget("success", "foreground"), "#6CE9A6")
 
+    def test_pargar_history_tab_is_read_only_and_separate(self):
+        self.app._display_pargar_history([
+            ("NOTICE-1", "C:/incoming/notice.zip", "sent", "MAIL-1", "موفق", 10),
+            ("NOTICE-2", "C:/incoming/failed.zip", "failed", None, "خطا", 20),
+        ])
+
+        rows = self.app.pargar_history_tree.get_children()
+        self.assertEqual(len(rows), 2)
+        first = self.app.pargar_history_tree.item(rows[0], "values")
+        second = self.app.pargar_history_tree.item(rows[1], "values")
+        self.assertEqual(first[1:5], ("موفق", "NOTICE-1", "notice.zip", "MAIL-1"))
+        self.assertEqual(second[1:5], ("ناموفق", "NOTICE-2", "failed.zip", "—"))
+        self.assertEqual(str(self.app.pargar_history_tree.cget("selectmode")), "browse")
+        self.assertEqual(self.app.status.get(), "تاریخچه پرگار: 2 رکورد")
+
 
 class OfficeUiTest(unittest.TestCase):
     def test_office_mode_hides_training_and_captcha_tabs(self):
@@ -1011,7 +1027,10 @@ class OfficeUiTest(unittest.TestCase):
                 ]
                 self.assertEqual(
                     names,
-                    ["اطلاعات ورود", "آپلود و دانلود", "خروجی و گزارش", "پرگار"],
+                    [
+                        "اطلاعات ورود", "آپلود و دانلود", "خروجی و گزارش",
+                        "پرگار", "تاریخچه پرگار",
+                    ],
                 )
                 self.assertIn("FT Office", root.title())
             finally:

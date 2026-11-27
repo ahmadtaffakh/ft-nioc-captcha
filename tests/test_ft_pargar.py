@@ -7,11 +7,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ft_pargar import (
+    CMF_TRUNCATION_MARKER,
+    MAX_PARGAR_BODY_CHARS,
     PargarClient,
     PargarError,
     PargarFolderMonitor,
     _prepare_pargar_candidate,
     _state_db,
+    list_pargar_history,
 )
 
 
@@ -107,6 +110,11 @@ class PargarCmfTest(unittest.TestCase):
         manifest = {
             "delivery_intent": intent,
             "notice_id": "NOTICE-1",
+            "notice_no": "1405222366652",
+            "web_datetime": "1405/03/05-09:30",
+            "issuer_unit_name": "دادگاه صلح قزوین",
+            "subject_type": "ابلاغیه تبادل لوایح",
+            "parties": [{"name": "اسم طرف"}],
             "package": {"filename": name, "size": package.stat().st_size, "sha256": digest},
             "consumers": {"pargar": {"attachment": name, "subject": "موضوع", "body": "متن"}},
         }
@@ -121,11 +129,46 @@ class PargarCmfTest(unittest.TestCase):
             package = self._write_pair(directory)
             delivery = _prepare_pargar_candidate(package)
             expected_digest = hashlib.sha256(package.read_bytes()).hexdigest()
+            expected_body = package.with_suffix(".cmf").read_text(encoding="utf-8")
 
         self.assertEqual(delivery["notice_id"], "NOTICE-1")
-        self.assertEqual(delivery["subject"], "موضوع")
-        self.assertEqual(delivery["body"], "متن")
+        self.assertEqual(
+            delivery["subject"],
+            "ابلاغیه شماره 1405222366652 با تاریخ ثبت 1405/03/05 "
+            "مرجع دادگاه صلح قزوین موضوع ابلاغیه تبادل لوایح طرف : اسم طرف",
+        )
+        self.assertEqual(delivery["body"], expected_body)
         self.assertEqual(delivery["sha256"], expected_digest)
+
+    def test_large_cmf_body_is_explicitly_truncated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = self._write_pair(directory)
+            manifest_path = package.with_suffix(".cmf")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["padding"] = "x" * (MAX_PARGAR_BODY_CHARS + 500)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            delivery = _prepare_pargar_candidate(package)
+
+        self.assertEqual(len(delivery["body"]), MAX_PARGAR_BODY_CHARS)
+        self.assertTrue(delivery["body"].endswith(CMF_TRUNCATION_MARKER))
+
+    def test_subject_requires_notice_metadata_and_party_names(self):
+        cases = (
+            {"notice_no": ""},
+            {"web_datetime": None},
+            {"issuer_unit_name": ""},
+            {"subject_type": ""},
+            {"parties": []},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                package = self._write_pair(directory)
+                manifest_path = package.with_suffix(".cmf")
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest.update(changes)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.assertRaises(PargarError):
+                    _prepare_pargar_candidate(package)
 
     def test_rejects_zip_without_same_named_cmf(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -212,8 +255,8 @@ class PargarCmfTest(unittest.TestCase):
         self.assertEqual(captured["path"], package)
         self.assertIs(captured["sender"], sender)
         self.assertIs(captured["receivers"], receivers)
-        self.assertEqual(captured["options"]["subject"], "موضوع")
-        self.assertEqual(captured["options"]["body"], "متن")
+        self.assertIn("ابلاغیه شماره 1405222366652", captured["options"]["subject"])
+        self.assertIn('"notice_id": "NOTICE-1"', captured["options"]["body"])
         self.assertEqual(row, ("NOTICE-1", "sent", "MAIL-1"))
         self.assertTrue(any(level == "success" for level, _message in events))
 
@@ -237,8 +280,30 @@ class PargarCmfTest(unittest.TestCase):
         self.assertEqual(mail_id, "MAIL-TEST")
         self.assertIs(captured["sender"], sender)
         self.assertIs(captured["receivers"], receivers)
-        self.assertEqual(captured["options"]["subject"], "موضوع")
-        self.assertEqual(captured["options"]["body"], "متن")
+        self.assertIn("ابلاغیه شماره 1405222366652", captured["options"]["subject"])
+        self.assertIn('"notice_id": "NOTICE-1"', captured["options"]["body"])
+
+    def test_lists_only_pargar_history_newest_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            db = _state_db(data_dir / "pargar-state.sqlite3")
+            db.execute(
+                "INSERT INTO messages(hash,source_path,status,mail_id,detail,updated_at,notice_id) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("a", "old.zip", "failed", None, "خطا", 10, "N-1"),
+            )
+            db.execute(
+                "INSERT INTO messages(hash,source_path,status,mail_id,detail,updated_at,notice_id) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("b", "new.zip", "sent", "MAIL-2", "موفق", 20, "N-2"),
+            )
+            db.commit()
+            db.close()
+
+            records = list_pargar_history(data_dir)
+
+        self.assertEqual([record[0] for record in records], ["N-2", "N-1"])
+        self.assertEqual(records[0][2:5], ("sent", "MAIL-2", "موفق"))
 
 
 if __name__ == "__main__":

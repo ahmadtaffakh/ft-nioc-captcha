@@ -22,6 +22,8 @@ from pathlib import Path
 TEMP_SUFFIXES = (".tmp", ".part", ".crdownload")
 DEFAULT_MESSAGE = "فایل «{filename}» جهت بررسی ارسال می‌شود."
 CATALOG_PREFIX = "CAT-PKG--"
+MAX_PARGAR_BODY_CHARS = 10_000
+CMF_TRUNCATION_MARKER = "\n\n[محتوای CMF به علت طول زیاد کوتاه شد.]"
 
 
 class PargarError(RuntimeError):
@@ -229,7 +231,8 @@ def _prepare_pargar_candidate(path: Path) -> dict:
     if not manifest_path.is_file():
         raise PargarError("CMF هم‌نام بسته ZIP وجود ندارد؛ ارسال انجام نشد.")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        manifest_text = manifest_path.read_text(encoding="utf-8-sig")
+        manifest = json.loads(manifest_text)
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise PargarError(f"CMF قابل‌خواندن نیست: {error}") from error
     if not isinstance(manifest, dict):
@@ -266,18 +269,61 @@ def _prepare_pargar_candidate(path: Path) -> dict:
     if digest != expected_hash.lower():
         raise PargarError("SHA-256 بسته با package داخل CMF تطبیق ندارد.")
 
-    subject = pargar.get("subject")
-    body = pargar.get("body")
-    if not isinstance(subject, str) or not subject.strip():
-        raise PargarError("موضوع پرگار در CMF معتبر نیست.")
-    if not isinstance(body, str) or not body.strip():
-        raise PargarError("متن پرگار در CMF معتبر نیست.")
+    required_fields = {
+        "notice_no": "شماره ابلاغیه",
+        "web_datetime": "تاریخ ثبت",
+        "issuer_unit_name": "مرجع",
+        "subject_type": "موضوع ابلاغیه",
+    }
+    values = {}
+    for field, label in required_fields.items():
+        value = manifest.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise PargarError(f"{label} در CMF معتبر نیست.")
+        values[field] = value.strip()
+    registration_date = values["web_datetime"].split("-", 1)[0].strip()
+    if not registration_date:
+        raise PargarError("تاریخ ثبت در CMF معتبر نیست.")
+
+    parties = manifest.get("parties")
+    if not isinstance(parties, list) or not parties:
+        raise PargarError("نام طرف در CMF وجود ندارد.")
+    party_names = []
+    for party in parties:
+        name = party.get("name") if isinstance(party, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            raise PargarError("نام یکی از طرف‌ها در CMF معتبر نیست.")
+        party_names.append(name.strip())
+    subject = (
+        f"ابلاغیه شماره {values['notice_no']} با تاریخ ثبت {registration_date} "
+        f"مرجع {values['issuer_unit_name']} موضوع {values['subject_type']} "
+        f"طرف : {'، '.join(party_names)}"
+    )
+    if len(manifest_text) > MAX_PARGAR_BODY_CHARS:
+        body = manifest_text[:MAX_PARGAR_BODY_CHARS - len(CMF_TRUNCATION_MARKER)] + CMF_TRUNCATION_MARKER
+    else:
+        body = manifest_text
     return {
         "notice_id": notice_id.strip(),
         "sha256": digest,
         "subject": subject,
         "body": body,
     }
+
+
+def list_pargar_history(data_dir: Path) -> list[tuple]:
+    """Return Pargar-only delivery history, newest first."""
+    database_path = Path(data_dir) / "pargar-state.sqlite3"
+    if not database_path.is_file():
+        return []
+    db = _state_db(database_path)
+    try:
+        return list(db.execute(
+            "SELECT notice_id,source_path,status,mail_id,detail,updated_at "
+            "FROM messages ORDER BY updated_at DESC"
+        ))
+    finally:
+        db.close()
 
 
 def _state_db(path: Path):

@@ -48,7 +48,13 @@ from ft_settings import (
     save_pargar_credentials,
     save_settings,
 )
-from ft_pargar import DEFAULT_MESSAGE, PargarClient, PargarError, PargarFolderMonitor
+from ft_pargar import (
+    DEFAULT_MESSAGE,
+    PargarClient,
+    PargarError,
+    PargarFolderMonitor,
+    list_pargar_history,
+)
 
 
 COLORS = {
@@ -328,6 +334,7 @@ class CaptchaLabApp:
         self.login_tab = ttk.Frame(self.notebook, padding=16)
         self.transfer_tab = ttk.Frame(self.notebook, padding=16)
         self.pargar_tab = ttk.Frame(self.notebook, padding=16)
+        self.pargar_history_tab = ttk.Frame(self.notebook, padding=16)
         self.browser_tab = ttk.Frame(self.notebook, padding=16)
         self.data_tab = ttk.Frame(self.notebook, padding=16)
         self.output_tab = ttk.Frame(self.notebook, padding=16)
@@ -338,6 +345,7 @@ class CaptchaLabApp:
             self.notebook.add(self.data_tab, text="  داده و آموزش  ")
         self.notebook.add(self.output_tab, text="  خروجی و گزارش  ")
         self.notebook.add(self.pargar_tab, text="  پرگار  ")
+        self.notebook.add(self.pargar_history_tab, text="  تاریخچه پرگار  ")
         self.notebook.enable_traversal()
         self.transfer_notebook = ttk.Notebook(self.transfer_tab)
         self.transfer_notebook.pack(fill="both", expand=True)
@@ -353,6 +361,7 @@ class CaptchaLabApp:
         self._build_upload_tab()
         self._build_download_tab()
         self._build_pargar_tab()
+        self._build_pargar_history_tab()
         self._build_output_tab()
 
         status_bar = ttk.Frame(container, style="StatusBar.TFrame", padding=(10, 7))
@@ -1128,6 +1137,74 @@ class CaptchaLabApp:
             self.pargar_start_button.state(["!disabled"])
             self.pargar_stop_button.state(["disabled"])
         self.root.after(1000, self._refresh_pargar_monitor_ui)
+
+    def _build_pargar_history_tab(self):
+        toolbar = ttk.Frame(self.pargar_history_tab)
+        toolbar.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            toolbar, text="تاریخچه مستقل ارسال به پرگار", font=("Tahoma", 10, "bold")
+        ).pack(side="right")
+        self._button(
+            toolbar,
+            "به‌روزرسانی تاریخچه",
+            self._load_pargar_history,
+            "آخرین وضعیت پیام‌های ثبت‌شده در State پرگار را نمایش می‌دهد.",
+        ).pack(side="left")
+
+        columns = ("updated_at", "status", "notice_id", "source", "mail_id", "detail")
+        self.pargar_history_tree = ttk.Treeview(
+            self.pargar_history_tab, columns=columns, show="headings", selectmode="browse"
+        )
+        headings = {
+            "updated_at": "زمان",
+            "status": "وضعیت",
+            "notice_id": "شناسه ابلاغیه",
+            "source": "فایل ZIP",
+            "mail_id": "شناسه پیام",
+            "detail": "جزئیات",
+        }
+        widths = {
+            "updated_at": 135, "status": 90, "notice_id": 170,
+            "source": 220, "mail_id": 120, "detail": 260,
+        }
+        for column in columns:
+            self.pargar_history_tree.heading(column, text=headings[column], anchor="center")
+            self.pargar_history_tree.column(column, width=widths[column], anchor="center")
+        scrollbar = ttk.Scrollbar(
+            self.pargar_history_tab, orient="vertical", command=self.pargar_history_tree.yview
+        )
+        self.pargar_history_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="left", fill="y")
+        self.pargar_history_tree.pack(fill="both", expand=True)
+
+    def _load_pargar_history(self):
+        self._submit_pargar(
+            "pargar_history", list_pargar_history, self.base_dir,
+            success=self._display_pargar_history,
+        )
+
+    def _display_pargar_history(self, records):
+        labels = {
+            "sent": "موفق",
+            "sending": "در حال ارسال",
+            "failed": "ناموفق",
+            "ambiguous": "نیازمند بررسی",
+        }
+        for item in self.pargar_history_tree.get_children():
+            self.pargar_history_tree.delete(item)
+        for notice_id, source_path, status, mail_id, detail, updated_at in records:
+            changed_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated_at))
+            self.pargar_history_tree.insert(
+                "", "end", values=(
+                    changed_at,
+                    labels.get(status, status),
+                    notice_id or "—",
+                    Path(source_path).name,
+                    mail_id or "—",
+                    detail or "—",
+                ),
+            )
+        self.status.set(f"تاریخچه پرگار: {len(records)} رکورد")
 
     def _build_output_tab(self):
         toolbar = ttk.Frame(self.output_tab)
@@ -2210,6 +2287,8 @@ class CaptchaLabApp:
                 self.status.set(message)
                 self._log("success", message)
             elif operation == "upload_history":
+                pass
+            elif operation == "pargar_history":
                 pass
             elif operation in {"upload_folder", "auto_upload_folder"}:
                 if operation == "auto_upload_folder" and not any(payload.values()):
