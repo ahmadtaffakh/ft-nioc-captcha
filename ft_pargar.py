@@ -21,6 +21,7 @@ from pathlib import Path
 
 TEMP_SUFFIXES = (".tmp", ".part", ".crdownload")
 DEFAULT_MESSAGE = "فایل «{filename}» جهت بررسی ارسال می‌شود."
+CATALOG_PREFIX = "CAT-PKG--"
 
 
 class PargarError(RuntimeError):
@@ -107,15 +108,16 @@ class PargarClient:
         return {"ContactId": str(contact_id)}
 
     def send_file(self, path: Path, sender: dict, receivers: list[dict], message_template: str,
-                  expected_sha256: str | None = None) -> dict:
+                  expected_sha256: str | None = None, *, subject: str | None = None,
+                  body: str | None = None) -> dict:
         path = Path(path)
         if not path.is_file() or path.suffix.lower() in TEMP_SUFFIXES:
             raise PargarError("فایل ورودی معتبر یا کامل نیست.")
         if not receivers:
             raise PargarError("حداقل یک گیرنده انتخاب کنید.")
         message = {
-            "Subject": path.name,
-            "TextBody": message_template.replace("{filename}", path.name),
+            "Subject": path.name if subject is None else subject,
+            "TextBody": message_template.replace("{filename}", path.name) if body is None else body,
             "RedirectLink": None,
             "Sender": self._participant(sender),
             "Receivers": [self._participant(item) for item in receivers],
@@ -215,11 +217,81 @@ def fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _prepare_pargar_candidate(path: Path) -> dict:
+    """Validate one Eblaghyar ZIP and return its CMF-owned Pargar fields."""
+    path = Path(path)
+    if path.suffix.lower() != ".zip":
+        raise PargarError("فقط بسته ZIP ابلاغیار قابل ارسال به پرگار است.")
+    if path.name.startswith(CATALOG_PREFIX):
+        raise PargarError("بسته CAT-PKG فقط متعلق به کاتالوگ است و به پرگار ارسال نمی‌شود.")
+
+    manifest_path = path.with_suffix(".cmf")
+    if not manifest_path.is_file():
+        raise PargarError("CMF هم‌نام بسته ZIP وجود ندارد؛ ارسال انجام نشد.")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise PargarError(f"CMF قابل‌خواندن نیست: {error}") from error
+    if not isinstance(manifest, dict):
+        raise PargarError("ساختار CMF معتبر نیست.")
+
+    intent = manifest.get("delivery_intent")
+    if intent == "catalog_response":
+        raise PargarError("این بسته فقط پاسخ کاتالوگ است و به پرگار ارسال نمی‌شود.")
+    if intent != "pargar_auto":
+        raise PargarError("delivery_intent در CMF باید دقیقاً pargar_auto باشد.")
+
+    notice_id = manifest.get("notice_id")
+    package = manifest.get("package")
+    consumers = manifest.get("consumers")
+    pargar = consumers.get("pargar") if isinstance(consumers, dict) else None
+    if not isinstance(notice_id, str) or not notice_id.strip():
+        raise PargarError("notice_id معتبر در CMF وجود ندارد.")
+    if not isinstance(package, dict) or not isinstance(pargar, dict):
+        raise PargarError("بخش package یا consumers.pargar در CMF معتبر نیست.")
+    if package.get("filename") != path.name:
+        raise PargarError("نام package در CMF با نام ZIP تطبیق ندارد.")
+    if pargar.get("attachment") != path.name:
+        raise PargarError("نام consumers.pargar.attachment با نام ZIP تطبیق ندارد.")
+
+    expected_size = package.get("size")
+    expected_hash = package.get("sha256")
+    if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+        raise PargarError("اندازه package در CMF معتبر نیست.")
+    if path.stat().st_size != expected_size:
+        raise PargarError("اندازه ZIP با package داخل CMF تطبیق ندارد.")
+    if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+        raise PargarError("SHA-256 بسته در CMF معتبر نیست.")
+    digest = fingerprint(path)
+    if digest != expected_hash.lower():
+        raise PargarError("SHA-256 بسته با package داخل CMF تطبیق ندارد.")
+
+    subject = pargar.get("subject")
+    body = pargar.get("body")
+    if not isinstance(subject, str) or not subject.strip():
+        raise PargarError("موضوع پرگار در CMF معتبر نیست.")
+    if not isinstance(body, str) or not body.strip():
+        raise PargarError("متن پرگار در CMF معتبر نیست.")
+    return {
+        "notice_id": notice_id.strip(),
+        "sha256": digest,
+        "subject": subject,
+        "body": body,
+    }
+
+
 def _state_db(path: Path):
     connection = sqlite3.connect(path, timeout=15)
     connection.execute(
         "CREATE TABLE IF NOT EXISTS messages (hash TEXT PRIMARY KEY, source_path TEXT NOT NULL, "
         "status TEXT NOT NULL, mail_id TEXT, detail TEXT, updated_at REAL NOT NULL)"
+    )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+    if "notice_id" not in columns:
+        connection.execute("ALTER TABLE messages ADD COLUMN notice_id TEXT")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS messages_notice_hash "
+        "ON messages(notice_id, hash) WHERE notice_id IS NOT NULL"
     )
     connection.commit()
     return connection
@@ -261,21 +333,26 @@ class PargarFolderMonitor:
     def send_test_zip(self, path, client, sender, receivers, message):
         if path.suffix.lower() != ".zip" or not zipfile.is_zipfile(path):
             raise PargarError("یک فایل ZIP معتبر انتخاب کنید.")
-        digest = fingerprint(path)
+        delivery = _prepare_pargar_candidate(path)
+        digest = delivery["sha256"]
         self.data_dir.mkdir(parents=True, exist_ok=True)
         db = _state_db(self.data_dir / "pargar-state.sqlite3")
         try:
             with db:
                 claim = db.execute(
-                    "INSERT INTO messages(hash,source_path,status,updated_at) VALUES(?,?,?,?) "
+                    "INSERT INTO messages(hash,source_path,status,updated_at,notice_id) VALUES(?,?,?,?,?) "
                     "ON CONFLICT(hash) DO UPDATE SET source_path=excluded.source_path, "
-                    "status=excluded.status, updated_at=excluded.updated_at WHERE messages.status='failed'",
-                    (digest, str(path), "sending", time.time()),
+                    "status=excluded.status, updated_at=excluded.updated_at WHERE messages.status='failed' "
+                    "AND messages.notice_id=excluded.notice_id",
+                    (digest, str(path), "sending", time.time(), delivery["notice_id"]),
                 )
                 if not claim.rowcount:
                     raise PargarError("این فایل قبلاً ارسال شده یا وضعیت ارسال قبلی آن نیاز به بررسی دارد.")
             try:
-                result = client.send_file(path, sender, receivers, message, expected_sha256=digest)
+                result = client.send_file(
+                    path, sender, receivers, message, expected_sha256=digest,
+                    subject=delivery["subject"], body=delivery["body"],
+                )
             except Exception as error:
                 status = "ambiguous" if isinstance(error, AmbiguousSendError) else "failed"
                 with db:
@@ -293,9 +370,15 @@ class PargarFolderMonitor:
     def _run(self, folder, client, sender, receivers, template, interval, process_existing):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         db = _state_db(self.data_dir / "pargar-state.sqlite3")
-        rows = list(db.execute("SELECT hash,status FROM messages"))
-        known_hashes = {digest for digest, status in rows if status in {"sent", "ambiguous", "sending"}}
-        retry_hashes = {digest for digest, status in rows if status == "failed"}
+        rows = list(db.execute("SELECT notice_id,hash,status FROM messages"))
+        known_deliveries = {
+            (notice_id, digest) for notice_id, digest, status in rows
+            if notice_id and status in {"sent", "ambiguous", "sending"}
+        }
+        retry_deliveries = {
+            (notice_id, digest) for notice_id, digest, status in rows
+            if notice_id and status == "failed"
+        }
         baseline = {}
         if not process_existing:
             try:
@@ -319,14 +402,17 @@ class PargarFolderMonitor:
                 for path in paths:
                     if not path.is_file() or path.is_symlink() or path.name.lower().endswith(TEMP_SUFFIXES):
                         continue
+                    if path.suffix.lower() != ".zip":
+                        continue
                     try:
                         stat = path.stat()
                         signature = (stat.st_size, stat.st_mtime_ns)
                         key = str(path.resolve())
-                        digest = None
+                        delivery = None
                         if baseline.get(key) == signature and not process_existing:
-                            digest = fingerprint(path)
-                            if digest not in retry_hashes:
+                            delivery = _prepare_pargar_candidate(path)
+                            identity = (delivery["notice_id"], delivery["sha256"])
+                            if identity not in retry_deliveries:
                                 continue
                         prior = stable.get(key)
                         if prior and prior[0] == signature:
@@ -335,18 +421,31 @@ class PargarFolderMonitor:
                             stable[key] = (signature, 1)
                         if stable[key][1] < 2:
                             continue
-                        digest = digest or fingerprint(path)
-                        if digest in known_hashes:
+                        delivery = delivery or _prepare_pargar_candidate(path)
+                        digest = delivery["sha256"]
+                        identity = (delivery["notice_id"], digest)
+                        if identity in known_deliveries:
                             stable.pop(key, None)
                             continue
-                        db.execute(
-                            "INSERT OR IGNORE INTO messages(hash,source_path,status,updated_at) VALUES(?,?,?,?)",
-                            (digest, str(path), "sending", time.time()),
+                        claim = db.execute(
+                            "INSERT INTO messages(hash,source_path,status,updated_at,notice_id) "
+                            "VALUES(?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET "
+                            "source_path=excluded.source_path,status=excluded.status,"
+                            "updated_at=excluded.updated_at WHERE messages.status='failed' "
+                            "AND messages.notice_id=excluded.notice_id",
+                            (digest, str(path), "sending", time.time(), delivery["notice_id"]),
                         )
                         db.commit()
+                        if not claim.rowcount:
+                            self.emit("error", f"{path.name}: این notice_id و SHA-256 قبلاً ثبت شده است.")
+                            stable.pop(key, None)
+                            continue
                         self.emit("info", f"در حال ارسال: {path.name}")
                         try:
-                            result = client.send_file(path, sender, receivers, template, expected_sha256=digest)
+                            result = client.send_file(
+                                path, sender, receivers, template, expected_sha256=digest,
+                                subject=delivery["subject"], body=delivery["body"],
+                            )
                         except AmbiguousSendError as error:
                             status, detail, mail_id = "ambiguous", str(error), None
                         except Exception as error:
@@ -358,8 +457,8 @@ class PargarFolderMonitor:
                             (status, mail_id, detail, time.time(), digest),
                         )
                         db.commit()
-                        known_hashes.add(digest)
-                        retry_hashes.discard(digest)
+                        known_deliveries.add(identity)
+                        retry_deliveries.discard(identity)
                         level = "success" if status == "sent" else "error"
                         suffix = f" (شناسه پیام: {mail_id})" if mail_id else ""
                         self.emit(level, f"{path.name}: {detail}{suffix}")

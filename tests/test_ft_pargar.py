@@ -1,10 +1,18 @@
+import hashlib
+import json
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from ft_pargar import PargarClient, PargarError
+from ft_pargar import (
+    PargarClient,
+    PargarError,
+    PargarFolderMonitor,
+    _prepare_pargar_candidate,
+    _state_db,
+)
 
 
 class PargarClientTest(unittest.TestCase):
@@ -69,6 +77,168 @@ class PargarClientTest(unittest.TestCase):
             source.write_bytes(b"partial")
             with self.assertRaises(PargarError):
                 self.client.send_file(source, {"Contactid": "s"}, [{"Contactid": "r"}], "{filename}")
+
+    def test_cmf_subject_and_body_are_sent_without_template_expansion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "notice.zip"
+            source.write_bytes(b"zip bytes")
+            captured = {}
+
+            def capture(message, _attachment, _upload_name):
+                captured.update(message)
+                return {"Succeeded": True, "MailId": "id"}
+
+            with patch.object(self.client, "_send_multipart", side_effect=capture):
+                self.client.send_file(
+                    source, {"Contactid": "s"}, [{"Contactid": "r"}], "ignored {filename}",
+                    subject="موضوع CMF", body="متن CMF شامل {filename}",
+                )
+
+        self.assertEqual(captured["Subject"], "موضوع CMF")
+        self.assertEqual(captured["TextBody"], "متن CMF شامل {filename}")
+
+
+class PargarCmfTest(unittest.TestCase):
+    def _write_pair(self, directory, *, name="notice.zip", intent="pargar_auto", **changes):
+        package = Path(directory) / name
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr("notice.txt", "valid package")
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+        manifest = {
+            "delivery_intent": intent,
+            "notice_id": "NOTICE-1",
+            "package": {"filename": name, "size": package.stat().st_size, "sha256": digest},
+            "consumers": {"pargar": {"attachment": name, "subject": "موضوع", "body": "متن"}},
+        }
+        for key, value in changes.items():
+            section, field = key.split("__", 1)
+            manifest[section][field] = value
+        package.with_suffix(".cmf").write_text(json.dumps(manifest), encoding="utf-8")
+        return package
+
+    def test_prepares_valid_pargar_delivery_from_cmf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = self._write_pair(directory)
+            delivery = _prepare_pargar_candidate(package)
+            expected_digest = hashlib.sha256(package.read_bytes()).hexdigest()
+
+        self.assertEqual(delivery["notice_id"], "NOTICE-1")
+        self.assertEqual(delivery["subject"], "موضوع")
+        self.assertEqual(delivery["body"], "متن")
+        self.assertEqual(delivery["sha256"], expected_digest)
+
+    def test_rejects_zip_without_same_named_cmf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "notice.zip"
+            package.write_bytes(b"zip")
+            with self.assertRaisesRegex(PargarError, "CMF"):
+                _prepare_pargar_candidate(package)
+
+    def test_rejects_catalog_request_and_response_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("CAT-REQ--one.req", "CAT-RSP--one.rsp", "partial.part"):
+                path = Path(directory) / name
+                path.write_bytes(b"not a package")
+                with self.subTest(name=name), self.assertRaises(PargarError):
+                    _prepare_pargar_candidate(path)
+
+    def test_rejects_catalog_and_missing_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = self._write_pair(directory, name="CAT-PKG--one.zip")
+            with self.assertRaisesRegex(PargarError, "کاتالوگ"):
+                _prepare_pargar_candidate(catalog)
+
+            missing = self._write_pair(directory, name="missing.zip", intent=None)
+            with self.assertRaisesRegex(PargarError, "pargar_auto"):
+                _prepare_pargar_candidate(missing)
+
+            response = self._write_pair(directory, name="response.zip", intent="catalog_response")
+            with self.assertRaisesRegex(PargarError, "پاسخ کاتالوگ"):
+                _prepare_pargar_candidate(response)
+
+    def test_rejects_attachment_size_and_hash_mismatches(self):
+        cases = (
+            {"consumers__pargar": {"attachment": "other.zip", "subject": "موضوع", "body": "متن"}},
+            {"package__size": 999},
+            {"package__sha256": "0" * 64},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                package = self._write_pair(directory, **changes)
+                with self.assertRaises(PargarError):
+                    _prepare_pargar_candidate(package)
+
+    def test_state_records_notice_id_separately_from_ft_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = _state_db(Path(directory) / "pargar.sqlite3")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+            indexes = {row[1] for row in db.execute("PRAGMA index_list(messages)")}
+            db.close()
+
+        self.assertIn("notice_id", columns)
+        self.assertIn("messages_notice_hash", indexes)
+
+    def test_monitor_uses_ui_contacts_and_cmf_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "incoming"
+            data_dir = Path(directory) / "state"
+            folder.mkdir()
+            package = self._write_pair(folder)
+            events = []
+            captured = {}
+            monitor = PargarFolderMonitor(data_dir, lambda level, message: events.append((level, message)))
+            sender = {"Contactid": "sender-from-ui"}
+            receivers = [{"Contactid": "receiver-from-ui"}]
+
+            class Client:
+                def send_file(self, path, sent_sender, sent_receivers, template, **options):
+                    captured.update(
+                        path=path, sender=sent_sender, receivers=sent_receivers,
+                        template=template, options=options,
+                    )
+                    monitor.stop()
+                    return {"Succeeded": True, "MailId": "MAIL-1"}
+
+            with patch.object(monitor._stop, "wait", return_value=False):
+                monitor._run(folder, Client(), sender, receivers, "UI template", 5, True)
+
+            db = _state_db(data_dir / "pargar-state.sqlite3")
+            row = db.execute(
+                "SELECT notice_id,status,mail_id FROM messages WHERE hash=?",
+                (hashlib.sha256(package.read_bytes()).hexdigest(),),
+            ).fetchone()
+            db.close()
+
+        self.assertEqual(captured["path"], package)
+        self.assertIs(captured["sender"], sender)
+        self.assertIs(captured["receivers"], receivers)
+        self.assertEqual(captured["options"]["subject"], "موضوع")
+        self.assertEqual(captured["options"]["body"], "متن")
+        self.assertEqual(row, ("NOTICE-1", "sent", "MAIL-1"))
+        self.assertTrue(any(level == "success" for level, _message in events))
+
+    def test_manual_test_send_also_requires_and_uses_cmf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "incoming"
+            folder.mkdir()
+            package = self._write_pair(folder)
+            captured = {}
+
+            class Client:
+                def send_file(self, path, sender, receivers, template, **options):
+                    captured.update(path=path, sender=sender, receivers=receivers, options=options)
+                    return {"Succeeded": True, "MailId": "MAIL-TEST"}
+
+            monitor = PargarFolderMonitor(Path(directory) / "state", lambda *_args: None)
+            sender = {"Contactid": "sender-from-ui"}
+            receivers = [{"Contactid": "receiver-from-ui"}]
+            mail_id = monitor.send_test_zip(package, Client(), sender, receivers, "ignored")
+
+        self.assertEqual(mail_id, "MAIL-TEST")
+        self.assertIs(captured["sender"], sender)
+        self.assertIs(captured["receivers"], receivers)
+        self.assertEqual(captured["options"]["subject"], "موضوع")
+        self.assertEqual(captured["options"]["body"], "متن")
 
 
 if __name__ == "__main__":
