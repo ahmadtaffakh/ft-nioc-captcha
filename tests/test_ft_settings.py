@@ -8,10 +8,13 @@ from pathlib import Path
 from ft_settings import (
     AppSettings,
     CREDENTIALS_FILENAME,
+    PARGAR_CREDENTIALS_FILENAME,
     delete_credentials,
     load_credentials,
+    load_pargar_credentials,
     load_settings,
     save_credentials,
+    save_pargar_credentials,
     save_settings,
 )
 
@@ -90,6 +93,23 @@ class CredentialStoreTest(unittest.TestCase):
             self.assertTrue(delete_credentials(base_dir))
             self.assertFalse((base_dir / CREDENTIALS_FILENAME).exists())
             self.assertFalse(delete_credentials(base_dir))
+
+    def test_pargar_credentials_round_trip_without_plaintext_on_disk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base_dir = Path(temporary)
+            username = "pargar-user"
+            token = "not-a-real-pargar-token"
+
+            path = save_pargar_credentials(base_dir, username, token)
+            stored = path.read_bytes()
+            protected = base64.b64decode(stored, validate=True)
+
+            self.assertEqual(path.name, PARGAR_CREDENTIALS_FILENAME)
+            self.assertNotIn(username.encode("utf-8"), stored)
+            self.assertNotIn(token.encode("utf-8"), stored)
+            self.assertNotIn(username.encode("utf-8"), protected)
+            self.assertNotIn(token.encode("utf-8"), protected)
+            self.assertEqual(load_pargar_credentials(base_dir), (username, token))
 
 
 if __name__ == "__main__":

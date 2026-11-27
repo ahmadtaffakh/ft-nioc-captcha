@@ -10,7 +10,7 @@ from unittest.mock import Mock, call, patch
 import tkinter as tk
 from tkinter import ttk
 
-from captcha_lab import AUTO_UPLOAD_INTERVAL_MS, CaptchaLabApp
+from captcha_lab import AUTO_SAVE_DELAY_MS, AUTO_UPLOAD_INTERVAL_MS, COLORS, CaptchaLabApp
 from ft_auto_uploader import open_state, process_file
 from ft_runtime import BrowserSession, RuntimeResult, capture_captcha_bytes
 from ft_runtime import load_model as load_runtime_model
@@ -866,6 +866,61 @@ class BatchCaptureTest(unittest.TestCase):
 
 
 class CredentialPersistenceTest(unittest.TestCase):
+    def test_auto_save_persists_complete_credentials_and_preferences(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.base_dir = Path("app-data")
+        app.username = Mock(**{"get.return_value": "ft-user"})
+        app.password = Mock(**{"get.return_value": "ft-password"})
+        app.pargar_username = Mock(**{"get.return_value": "pargar-user"})
+        app.pargar_token = Mock(**{"get.return_value": "pargar-token"})
+        app._save_preferences = Mock(return_value=True)
+        app._log = Mock()
+
+        with (
+            patch("captcha_lab.save_credentials") as save_ft,
+            patch("captcha_lab.save_pargar_credentials") as save_pargar,
+        ):
+            self.assertTrue(app._save_all_fields())
+
+        save_ft.assert_called_once_with(Path("app-data"), "ft-user", "ft-password")
+        save_pargar.assert_called_once_with(
+            Path("app-data"), "pargar-user", "pargar-token"
+        )
+        app._save_preferences.assert_called_once_with(announce=False)
+
+    def test_auto_save_preserves_stored_credentials_while_fields_are_incomplete(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.base_dir = Path("app-data")
+        app.username = Mock(**{"get.return_value": "ft-user"})
+        app.password = Mock(**{"get.return_value": ""})
+        app.pargar_username = Mock(**{"get.return_value": ""})
+        app.pargar_token = Mock(**{"get.return_value": "pargar-token"})
+        app._save_preferences = Mock(return_value=True)
+        app._log = Mock()
+
+        with (
+            patch("captcha_lab.save_credentials") as save_ft,
+            patch("captcha_lab.save_pargar_credentials") as save_pargar,
+        ):
+            app._save_all_fields()
+
+        save_ft.assert_not_called()
+        save_pargar.assert_not_called()
+
+    def test_auto_save_is_debounced_for_three_seconds(self):
+        app = CaptchaLabApp.__new__(CaptchaLabApp)
+        app.root = Mock()
+        app.settings_save_pending = "previous"
+        app.root.after.return_value = "next"
+
+        app._schedule_preferences_save()
+
+        app.root.after_cancel.assert_called_once_with("previous")
+        app.root.after.assert_called_once_with(
+            AUTO_SAVE_DELAY_MS, app._save_changed_preferences
+        )
+        self.assertEqual(app.settings_save_pending, "next")
+
     def test_successful_automatic_login_saves_credentials(self):
         app = CaptchaLabApp.__new__(CaptchaLabApp)
         app.base_dir = Path("app-data")
@@ -933,9 +988,7 @@ class OrganizationalUiTest(unittest.TestCase):
         self.app.download_dir.set("download-folder")
         self.app.captcha_submit_delay_seconds.set(3.5)
         self.app.thinclient_test_download.set(True)
-        saved = tk.BooleanVar(self.root, value=False)
-        self.root.after(400, lambda: saved.set(True))
-        self.root.wait_variable(saved)
+        self.app._save_changed_preferences()
         settings = load_settings(self.app.base_dir)
         self.assertEqual(settings.watch_dir, "upload-folder")
         self.assertEqual(settings.download_dir, "download-folder")
@@ -961,6 +1014,21 @@ class OrganizationalUiTest(unittest.TestCase):
         self.app.active_tasks.clear()
         self.app._sync_activity_status()
         self.assertEqual(self.app.activity_status.get(), "آماده")
+
+    def test_window_close_minimizes_to_system_tray(self):
+        with patch.object(self.app, "_ensure_tray_icon", return_value=True), patch.object(
+            self.root, "withdraw"
+        ) as withdraw:
+            self.app._minimize_to_tray()
+
+        withdraw.assert_called_once_with()
+        self.assertFalse(self.app.closing)
+
+    def test_exit_button_is_red_and_requests_full_exit(self):
+        self.assertEqual(self.app.exit_button.cget("text"), "خروج")
+        self.assertEqual(str(self.app.exit_button.cget("style")), "Exit.TButton")
+        style = ttk.Style(self.root)
+        self.assertEqual(style.lookup("Exit.TButton", "background"), COLORS["danger"])
 
     def test_login_and_training_actions_are_grouped_in_single_rows(self):
         expected_counts = {
@@ -1011,6 +1079,31 @@ class OrganizationalUiTest(unittest.TestCase):
         self.assertEqual(second[1:5], ("ناموفق", "NOTICE-2", "failed.zip", "—"))
         self.assertEqual(str(self.app.pargar_history_tree.cget("selectmode")), "browse")
         self.assertEqual(self.app.status.get(), "تاریخچه پرگار: 2 رکورد")
+
+    def test_pargar_notification_is_near_tray_and_closes_after_four_seconds(self):
+        scheduled = {}
+        original_after = self.root.after
+
+        def capture_after(delay, callback=None, *args):
+            if delay == 4000:
+                scheduled["delay"] = delay
+                scheduled["callback"] = callback
+                return "pargar-notification-after"
+            return original_after(delay, callback, *args)
+
+        with patch.object(self.root, "after", side_effect=capture_after):
+            self.app._show_pargar_sent_notification(
+                {"filename": "notice.zip", "mail_id": "MAIL-1"}
+            )
+
+        notification = self.app.pargar_notification
+        self.assertTrue(notification.winfo_exists())
+        self.assertEqual(scheduled["delay"], 4000)
+        self.assertGreaterEqual(notification.winfo_x(), 0)
+        self.assertGreaterEqual(notification.winfo_y(), 0)
+
+        scheduled["callback"]()
+        self.assertIsNone(self.app.pargar_notification)
 
 
 class OfficeUiTest(unittest.TestCase):

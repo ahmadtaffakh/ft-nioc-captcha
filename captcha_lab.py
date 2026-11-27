@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from app_icon import apply_app_icon
+from app_icon import icon_directory
 from captcha_training import (
     import_labeled_batch,
     load_model,
@@ -73,6 +74,7 @@ COLORS = {
 }
 
 AUTO_UPLOAD_INTERVAL_MS = 10_000
+AUTO_SAVE_DELAY_MS = 3_000
 ENVIRONMENT_LABELS = {
     "": "انتخاب نشده",
     "thinclient": "تین‌کلاینت",
@@ -185,7 +187,16 @@ class CaptchaLabApp:
         self.browser = BrowserSession(self.base_dir / "browser-profile", self.results, use_fava=True)
         self.pargar_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pargar-api")
         self.pargar_monitor = PargarFolderMonitor(
-            self.base_dir, lambda level, message: self.results.put(RuntimeLog(level, message))
+            self.base_dir,
+            lambda level, message: self.results.put(RuntimeLog(level, message)),
+            on_sent=lambda path, mail_id: self.results.put(
+                RuntimeResult(
+                    "pargar-notification",
+                    "pargar_sent",
+                    True,
+                    {"filename": Path(path).name, "mail_id": str(mail_id)},
+                )
+            ),
         )
         self.pargar_task_number = 0
         self.current_image = None
@@ -199,6 +210,7 @@ class CaptchaLabApp:
         self.download_cancelled = threading.Event()
         self.auto_download_warning = None
         self.startup_warnings = []
+        self.tray_icon = None
 
         try:
             settings = load_settings(self.base_dir)
@@ -281,6 +293,8 @@ class CaptchaLabApp:
         for field in fields(AppSettings):
             variable = getattr(self, "environment_label" if field.name == "environment" else field.name)
             variable.trace_add("write", self._schedule_preferences_save)
+        for variable in (self.username, self.password, self.pargar_username, self.pargar_token):
+            variable.trace_add("write", self._schedule_preferences_save)
         if not self.startup_warnings:
             self._save_preferences(announce=False)
         for warning in self.startup_warnings:
@@ -292,7 +306,7 @@ class CaptchaLabApp:
         self.root.after(1000, self._refresh_pargar_monitor_ui)
         self.root.after(AUTO_UPLOAD_INTERVAL_MS, self._auto_upload_tick)
         self.root.after(self._download_interval_ms(), self._auto_download_tick)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
         self.root.after(250, self._login)
 
     def _build_ui(self):
@@ -329,6 +343,14 @@ class CaptchaLabApp:
             text=f"نسخه {self.version}",
             style="VersionBadge.TLabel",
         ).pack(side="left", padx=(0, 12))
+        self.exit_button = self._button(
+            header,
+            "خروج",
+            self._exit_application,
+            "برنامه و مرورگر را به‌طور کامل می‌بندد.",
+            "Exit.TButton",
+        )
+        self.exit_button.pack(side="left")
 
         self.notebook = ttk.Notebook(container)
         self.login_tab = ttk.Frame(self.notebook, padding=16)
@@ -484,6 +506,22 @@ class CaptchaLabApp:
             borderwidth=0,
         )
         style.map("Danger.TButton", background=[("active", "#FECDCA")])
+        style.configure(
+            "Exit.TButton",
+            background=COLORS["danger"],
+            foreground="#FFFFFF",
+            font=("Tahoma", 9, "bold"),
+            padding=(12, 8),
+            borderwidth=0,
+        )
+        style.map(
+            "Exit.TButton",
+            background=[
+                ("pressed", COLORS["danger_active"]),
+                ("active", COLORS["danger_active"]),
+            ],
+            foreground=[("disabled", "#FFFFFF")],
+        )
         style.configure("TNotebook", background=COLORS["background"], borderwidth=0)
         style.configure(
             "TNotebook.Tab",
@@ -1075,6 +1113,43 @@ class CaptchaLabApp:
         message = f"پیام آزمایشی پرگار ارسال شد. شناسه پیام {mail_id}"
         self._log("success", message)
         self.status.set(message)
+
+    def _show_pargar_sent_notification(self, payload):
+        current = getattr(self, "pargar_notification", None)
+        if current is not None and current.winfo_exists():
+            current.destroy()
+
+        notification = tk.Toplevel(self.root)
+        self.pargar_notification = notification
+        notification.overrideredirect(True)
+        notification.attributes("-topmost", True)
+        notification.configure(background="#166534")
+
+        frame = tk.Frame(notification, background="#166534", padx=14, pady=10)
+        frame.pack(fill="both", expand=True)
+        tk.Label(
+            frame, text="ارسال به پرگار با موفقیت انجام شد", background="#166534",
+            foreground="white", font=("Tahoma", 10, "bold"), anchor="e",
+        ).pack(fill="x")
+        tk.Label(
+            frame,
+            text=f"{payload['filename']}\nشناسه پیام: {payload['mail_id']}",
+            background="#166534", foreground="white", font=("Tahoma", 9),
+            anchor="e", justify="right",
+        ).pack(fill="x", pady=(5, 0))
+
+        notification.update_idletasks()
+        x = notification.winfo_screenwidth() - notification.winfo_width() - 16
+        y = notification.winfo_screenheight() - notification.winfo_height() - 64
+        notification.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        def close_notification():
+            if notification.winfo_exists():
+                notification.destroy()
+            if self.pargar_notification is notification:
+                self.pargar_notification = None
+
+        self.root.after(4000, close_notification)
 
     def _pargar_test_send_pending(self):
         return any(task.startswith("pargar_test_send-") for task in self.queued_browser_tasks)
@@ -1901,11 +1976,32 @@ class CaptchaLabApp:
     def _schedule_preferences_save(self, *_args):
         if self.settings_save_pending is not None:
             self.root.after_cancel(self.settings_save_pending)
-        self.settings_save_pending = self.root.after(350, self._save_changed_preferences)
+        self.settings_save_pending = self.root.after(AUTO_SAVE_DELAY_MS, self._save_changed_preferences)
 
     def _save_changed_preferences(self):
         self.settings_save_pending = None
-        self._save_preferences(announce=False)
+        self._save_all_fields()
+
+    def _save_all_fields(self):
+        saved = self._save_preferences(announce=False)
+        credentials = (
+            (save_credentials, self.username.get(), self.password.get(), "FT"),
+            (
+                save_pargar_credentials,
+                self.pargar_username.get(),
+                self.pargar_token.get(),
+                "پرگار",
+            ),
+        )
+        for save, username, secret, label in credentials:
+            if not username.strip() or not secret.strip():
+                continue
+            try:
+                save(self.base_dir, username, secret)
+            except (OSError, RuntimeError, ValueError) as error:
+                saved = False
+                self._log("error", f"ذخیره خودکار اطلاعات ورود {label} ناموفق بود: {error}")
+        return saved
 
     def _forget_credentials(self):
         if not messagebox.askyesno(
@@ -2290,6 +2386,8 @@ class CaptchaLabApp:
                 pass
             elif operation == "pargar_history":
                 pass
+            elif operation == "pargar_sent":
+                self._show_pargar_sent_notification(payload)
             elif operation in {"upload_folder", "auto_upload_folder"}:
                 if operation == "auto_upload_folder" and not any(payload.values()):
                     continue
@@ -2311,7 +2409,59 @@ class CaptchaLabApp:
                 self._log("success", f"عملیات {operation} با موفقیت انجام شد.")
         self.root.after(100, self._poll_results)
 
-    def _on_close(self):
+    def _create_tray_icon(self):
+        import pystray
+        from PIL import Image
+
+        assets = icon_directory()
+        icon_path = assets / "ft-legal-transfer.png"
+        if not icon_path.is_file():
+            icon_path = assets / "ft-legal-transfer.ico"
+        with Image.open(icon_path) as source:
+            image = source.copy()
+        return pystray.Icon(
+            "ft-nioc-captcha",
+            image,
+            "FT Office" if self.office_mode else "FT CAPTCHA",
+            pystray.Menu(
+                pystray.MenuItem(
+                    "نمایش برنامه",
+                    lambda _icon, _item: self.root.after(0, self._show_from_tray),
+                    default=True,
+                ),
+                pystray.MenuItem(
+                    "خروج",
+                    lambda _icon, _item: self.root.after(0, self._exit_application),
+                ),
+            ),
+        )
+
+    def _ensure_tray_icon(self) -> bool:
+        if self.tray_icon is not None:
+            return True
+        try:
+            self.tray_icon = self._create_tray_icon()
+            self.tray_icon.run_detached()
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            self.tray_icon = None
+            messagebox.showerror("خطا", f"ایجاد آیکن System Tray ناموفق بود: {error}")
+            return False
+        return True
+
+    def _minimize_to_tray(self):
+        if self.closing or not self._ensure_tray_icon():
+            return
+        self.root.withdraw()
+
+    def _show_from_tray(self):
+        if self.closing:
+            return
+        self.root.deiconify()
+        self.root.state("normal")
+        self.root.lift()
+        self.root.focus_force()
+
+    def _exit_application(self):
         if self.closing:
             return
         if not messagebox.askyesno(
@@ -2319,10 +2469,13 @@ class CaptchaLabApp:
             "مرورگر بین عملیات باز می‌ماند. با خروج کامل از برنامه، مرورگر هم بسته می‌شود. ادامه می‌دهید؟",
         ):
             return
-        self._save_preferences(announce=False)
+        self._save_all_fields()
         self.pargar_monitor.stop()
         self.pargar_executor.shutdown(wait=False, cancel_futures=True)
         self.closing = True
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
         self.browser.cancel_batch()
         self.status.set("در حال بستن مرورگر...")
         self._log("warning", "در حال بستن برنامه و مرورگر...")

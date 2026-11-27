@@ -346,9 +346,10 @@ def _state_db(path: Path):
 class PargarFolderMonitor:
     """Serially watch one folder; no recursion and no automatic ambiguous retry."""
 
-    def __init__(self, data_dir: Path, emit):
+    def __init__(self, data_dir: Path, emit, on_sent=None):
         self.data_dir = Path(data_dir)
         self.emit = emit
+        self.on_sent = on_sent
         self._stop = threading.Event()
         self._thread = None
 
@@ -375,6 +376,14 @@ class PargarFolderMonitor:
 
     def stop(self):
         self._stop.set()
+
+    def _notify_sent(self, path, mail_id):
+        if self.on_sent is None:
+            return
+        try:
+            self.on_sent(path, mail_id)
+        except Exception as error:
+            self.emit("warning", f"اعلان ارسال پرگار نمایش داده نشد: {error}")
 
     def send_test_zip(self, path, client, sender, receivers, message):
         if path.suffix.lower() != ".zip" or not zipfile.is_zipfile(path):
@@ -409,6 +418,7 @@ class PargarFolderMonitor:
             with db:
                 db.execute("UPDATE messages SET status='sent',mail_id=?,updated_at=? WHERE hash=?",
                            (mail_id, time.time(), digest))
+            self._notify_sent(path, mail_id)
             return mail_id
         finally:
             db.close()
@@ -508,6 +518,8 @@ class PargarFolderMonitor:
                         level = "success" if status == "sent" else "error"
                         suffix = f" (شناسه پیام: {mail_id})" if mail_id else ""
                         self.emit(level, f"{path.name}: {detail}{suffix}")
+                        if status == "sent":
+                            self._notify_sent(path, mail_id)
                         stable.pop(key, None)
                     except (OSError, PargarError) as error:
                         self.emit("error", f"{path.name}: {error}")

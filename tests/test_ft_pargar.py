@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ft_pargar import (
+    AmbiguousSendError,
     CMF_TRUNCATION_MARKER,
     MAX_PARGAR_BODY_CHARS,
     PargarClient,
@@ -260,6 +261,52 @@ class PargarCmfTest(unittest.TestCase):
         self.assertEqual(row, ("NOTICE-1", "sent", "MAIL-1"))
         self.assertTrue(any(level == "success" for level, _message in events))
 
+    def test_monitor_notifies_only_after_confirmed_send(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "incoming"
+            data_dir = Path(directory) / "state"
+            folder.mkdir()
+            package = self._write_pair(folder)
+            notifications = []
+            monitor = PargarFolderMonitor(
+                data_dir,
+                lambda *_args: None,
+                on_sent=lambda path, mail_id: notifications.append((path, mail_id)),
+            )
+
+            class Client:
+                def send_file(self, *_args, **_options):
+                    monitor.stop()
+                    return {"Succeeded": True, "MailId": "MAIL-NOTIFY"}
+
+            with patch.object(monitor._stop, "wait", return_value=False):
+                monitor._run(folder, Client(), {}, [{}], "template", 5, True)
+
+        self.assertEqual(notifications, [(package, "MAIL-NOTIFY")])
+
+    def test_monitor_does_not_notify_after_failed_or_ambiguous_send(self):
+        for error in (PargarError("failed"), AmbiguousSendError("ambiguous")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory) / "incoming"
+                folder.mkdir()
+                self._write_pair(folder)
+                notifications = []
+                monitor = PargarFolderMonitor(
+                    Path(directory) / "state",
+                    lambda *_args: None,
+                    on_sent=lambda *args: notifications.append(args),
+                )
+
+                class Client:
+                    def send_file(self, *_args, **_options):
+                        monitor.stop()
+                        raise error
+
+                with patch.object(monitor._stop, "wait", return_value=False):
+                    monitor._run(folder, Client(), {}, [{}], "template", 5, True)
+
+            self.assertEqual(notifications, [])
+
     def test_manual_test_send_also_requires_and_uses_cmf(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory) / "incoming"
@@ -272,7 +319,12 @@ class PargarCmfTest(unittest.TestCase):
                     captured.update(path=path, sender=sender, receivers=receivers, options=options)
                     return {"Succeeded": True, "MailId": "MAIL-TEST"}
 
-            monitor = PargarFolderMonitor(Path(directory) / "state", lambda *_args: None)
+            notifications = []
+            monitor = PargarFolderMonitor(
+                Path(directory) / "state",
+                lambda *_args: None,
+                on_sent=lambda path, mail_id: notifications.append((path, mail_id)),
+            )
             sender = {"Contactid": "sender-from-ui"}
             receivers = [{"Contactid": "receiver-from-ui"}]
             mail_id = monitor.send_test_zip(package, Client(), sender, receivers, "ignored")
@@ -282,6 +334,7 @@ class PargarCmfTest(unittest.TestCase):
         self.assertIs(captured["receivers"], receivers)
         self.assertIn("ابلاغیه شماره 1405222366652", captured["options"]["subject"])
         self.assertIn('"notice_id": "NOTICE-1"', captured["options"]["body"])
+        self.assertEqual(notifications, [(package, "MAIL-TEST")])
 
     def test_lists_only_pargar_history_newest_first(self):
         with tempfile.TemporaryDirectory() as directory:
