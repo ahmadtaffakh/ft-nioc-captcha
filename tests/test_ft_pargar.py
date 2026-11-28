@@ -154,13 +154,14 @@ class PargarCmfTest(unittest.TestCase):
         self.assertEqual(len(delivery["body"]), MAX_PARGAR_BODY_CHARS)
         self.assertTrue(delivery["body"].endswith(CMF_TRUNCATION_MARKER))
 
-    def test_subject_requires_notice_metadata_and_party_names(self):
+    def test_subject_uses_placeholder_for_unusable_descriptive_fields(self):
         cases = (
             {"notice_no": ""},
             {"web_datetime": None},
             {"issuer_unit_name": ""},
             {"subject_type": ""},
-            {"parties": []},
+            {"parties": "نام طرف"},
+            {"parties": [{"name": ""}]},
         )
         for changes in cases:
             with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
@@ -169,8 +170,24 @@ class PargarCmfTest(unittest.TestCase):
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest.update(changes)
                 manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-                with self.assertRaises(PargarError):
-                    _prepare_pargar_candidate(package)
+                delivery = _prepare_pargar_candidate(package)
+                self.assertIn("ثبت نشده", delivery["subject"])
+
+    def test_subject_uses_placeholder_when_parties_are_unavailable(self):
+        for parties in ([], None):
+            with self.subTest(parties=parties), tempfile.TemporaryDirectory() as directory:
+                package = self._write_pair(directory)
+                manifest_path = package.with_suffix(".cmf")
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if parties is None:
+                    manifest.pop("parties")
+                else:
+                    manifest["parties"] = parties
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                delivery = _prepare_pargar_candidate(package)
+
+                self.assertTrue(delivery["subject"].endswith("طرف : ثبت نشده"))
 
     def test_rejects_zip_without_same_named_cmf(self):
         with tempfile.TemporaryDirectory() as directory:

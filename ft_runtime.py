@@ -11,7 +11,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
+
+UPLOAD_RETRY_DELAY_SECONDS = 180
 
 from captcha_inference import (
     load_model as load_lightweight_model,
@@ -25,6 +28,7 @@ from captcha_training import (
 )
 from ft_auto_uploader import (
     FILE_MANAGER_URL,
+    clear_upload_history,
     downloaded_fingerprint_exists,
     downloaded_remote_id_exists,
     list_upload_history,
@@ -161,7 +165,10 @@ class BrowserSession:
         self.batch_cancelled = threading.Event()
         self._task_numbers = itertools.count(1)
         self.transfers_paused = threading.Event()
-        self._upload_failures: dict[tuple[Path, str], dict[Path, tuple[int, int]]] = {}
+        self._upload_failures: dict[
+            tuple[Path, str], dict[Path, tuple[tuple[int, int], float]]
+        ] = {}
+        self._reported_downloads: set[str] = set()
 
     def submit(self, operation: str, function: Callable, *args) -> str:
         task_id = f"{operation}-{next(self._task_numbers)}"
@@ -414,10 +421,11 @@ class BrowserSession:
             stat = path.stat()
             signatures[path] = (stat.st_size, stat.st_mtime_ns)
         failure_key = (folder.resolve(), environment)
+        now = monotonic()
         failures = {
-            path: signature
-            for path, signature in self._upload_failures.get(failure_key, {}).items()
-            if signatures.get(path) == signature
+            path: (signature, retry_at)
+            for path, (signature, retry_at) in self._upload_failures.get(failure_key, {}).items()
+            if signatures.get(path) == signature and now < retry_at
         }
         self._upload_failures[failure_key] = failures
         selected, oversized = select_files_for_run(
@@ -460,6 +468,7 @@ class BrowserSession:
         connection = open_state(self.profile_dir.parent / "state.db")
         failed = 0
         processed = 0
+        already_downloaded = 0
         consecutive_failures = 0
         stopped = False
         try:
@@ -477,14 +486,19 @@ class BrowserSession:
                         scan_timeout_minutes * 60,
                         self._emit,
                         environment,
+                        reported_downloads=self._reported_downloads,
                     )
+                    if outcome == "downloaded":
+                        already_downloaded += 1
                     if outcome in {"downloaded", "upload_pending", "queue_pending", "rejected", "unknown", "unsupported"}:
-                        failures[path] = signatures[path]
+                        failures[path] = (signatures[path], float('inf'))
+                    elif outcome == 'timeout':
+                        failures[path] = (signatures[path], monotonic() + UPLOAD_RETRY_DELAY_SECONDS)
                     else:
                         failures.pop(path, None)
                     consecutive_failures = 0
                 except Exception as error:
-                    failures[path] = signatures[path]
+                    failures[path] = (signatures[path], monotonic() + UPLOAD_RETRY_DELAY_SECONDS)
                     failed += 1
                     consecutive_failures += 1
                     self._emit("error", f"خطا برای {path.name}: {error}")
@@ -504,6 +518,8 @@ class BrowserSession:
         }
         if stopped:
             result["stopped"] = True
+        if processed and processed == already_downloaded and not oversized:
+            result["downloaded_only"] = True
         return result
 
     @staticmethod
@@ -877,9 +893,11 @@ class BrowserSession:
             )
         return self.download_files(records, destination_dir, environment, upload_dir)
 
-    def upload_history(self):
+    def upload_history(self, *, clear=False):
         connection = open_state(self.profile_dir.parent / "state.db")
         try:
+            if clear:
+                return clear_upload_history(connection)
             return list_upload_history(connection)
         finally:
             connection.close()

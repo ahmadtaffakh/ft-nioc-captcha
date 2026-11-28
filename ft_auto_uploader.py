@@ -340,6 +340,9 @@ def open_state(path: Path) -> sqlite3.Connection:
         )
         """
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS hidden_upload_history (fingerprint TEXT PRIMARY KEY)"
+    )
     return connection
 
 
@@ -370,9 +373,18 @@ def list_upload_history(connection: sqlite3.Connection) -> list[tuple[str, str, 
         """
         SELECT source_path, status, updated_at
         FROM uploads
+        WHERE fingerprint NOT IN (SELECT fingerprint FROM hidden_upload_history)
         ORDER BY updated_at DESC, source_path
         """
     ).fetchall()
+
+
+def clear_upload_history(connection: sqlite3.Connection) -> list[tuple[str, str, int]]:
+    with connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO hidden_upload_history SELECT fingerprint FROM uploads"
+        )
+    return list_upload_history(connection)
 
 
 def downloaded_fingerprint_exists(connection: sqlite3.Connection, file_hash: str) -> bool:
@@ -604,6 +616,8 @@ def process_file(
     scan_timeout: float,
     emit=None,
     environment: str = "",
+    *,
+    reported_downloads: set[str] | None = None,
 ) -> str:
     validate_environment(environment)
     _write_network_debug(
@@ -613,11 +627,14 @@ def process_file(
     )
     file_hash = fingerprint(path)
     if downloaded_fingerprint_exists(connection, file_hash):
-        _report(
-            emit,
-            "warning",
-            f"فایل قبلاً از محیط مقابل دانلود شده و دوباره آپلود نمی‌شود: {path.name}",
-        )
+        if reported_downloads is None or file_hash not in reported_downloads:
+            _report(
+                emit,
+                "warning",
+                f"فایل قبلاً از محیط مقابل دانلود شده و دوباره آپلود نمی‌شود: {path.name}",
+            )
+            if reported_downloads is not None:
+                reported_downloads.add(file_hash)
         return "downloaded"
     row = connection.execute(
         "SELECT scan_file_id, status FROM uploads WHERE fingerprint = ?", (file_hash,)

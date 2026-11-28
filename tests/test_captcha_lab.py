@@ -719,10 +719,11 @@ class BatchCaptureTest(unittest.TestCase):
                 with (
                     patch.object(session, "_ensure_file_manager"),
                     patch("ft_runtime.process_file", side_effect=[RuntimeError("HTTP 400"), None, None]) as process,
+                    patch("ft_runtime.monotonic", return_value=0) as clock,
                 ):
                     session.upload_folder(folder, 1, 0, "thinclient", automatic=True)
                     session.upload_folder(folder, 1, 0, "thinclient", automatic=True)
-                    first.write_bytes(b"changed")
+                    clock.return_value = 180
                     session.upload_folder(folder, 1, 0, "thinclient", automatic=True)
                 self.assertEqual([call.args[3] for call in process.call_args_list], [first, second, first])
             finally:

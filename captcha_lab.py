@@ -1250,6 +1250,13 @@ class CaptchaLabApp:
             self._load_pargar_history,
             "آخرین وضعیت پیام‌های ثبت‌شده در State پرگار را نمایش می‌دهد.",
         ).pack(side="left")
+        self._button(
+            toolbar,
+            "پاک کردن سوابق پرگار",
+            self._clear_pargar_history,
+            "سوابق فعلی را از تاریخچه پنهان می‌کند و کنترل ارسال تکراری را حفظ می‌کند.",
+            "Danger.TButton",
+        ).pack(side="left", padx=8)
 
         columns = ("updated_at", "status", "notice_id", "source", "mail_id", "detail")
         self.pargar_history_tree = ttk.Treeview(
@@ -1280,6 +1287,12 @@ class CaptchaLabApp:
     def _load_pargar_history(self):
         self._submit_pargar(
             "pargar_history", list_pargar_history, self.base_dir,
+            success=self._display_pargar_history,
+        )
+
+    def _clear_pargar_history(self):
+        self._submit_pargar(
+            "pargar_history", lambda: list_pargar_history(self.base_dir, clear=True),
             success=self._display_pargar_history,
         )
 
@@ -1324,7 +1337,14 @@ class CaptchaLabApp:
             toolbar,
             "گزارش آپلودها",
             self._load_upload_history,
-            "همه سوابق ثبت‌شده را با تفکیک وضعیت نمایش می‌دهد.",
+            "سوابق قابل‌نمایش را با تفکیک وضعیت نشان می‌دهد.",
+        ).pack(side="left", padx=8)
+        self._button(
+            toolbar,
+            "پاک کردن سوابق آپلود",
+            self._clear_upload_history,
+            "سوابق فعلی را از گزارش پنهان می‌کند و کنترل ارسال تکراری را حفظ می‌کند.",
+            "Danger.TButton",
         ).pack(side="left", padx=8)
         self._button(
             toolbar,
@@ -1360,6 +1380,13 @@ class CaptchaLabApp:
         self._submit(
             "upload_history",
             self.browser.upload_history,
+            success=self._display_upload_history,
+        )
+
+    def _clear_upload_history(self):
+        self._submit(
+            "upload_history",
+            lambda: self.browser.upload_history(clear=True),
             success=self._display_upload_history,
         )
 
@@ -2416,7 +2443,9 @@ class CaptchaLabApp:
             elif operation == "pargar_sent":
                 self._show_pargar_sent_notification(payload)
             elif operation in {"upload_folder", "auto_upload_folder"}:
-                if operation == "auto_upload_folder" and not any(payload.values()):
+                if payload.get("downloaded_only") or (
+                    operation == "auto_upload_folder" and not any(payload.values())
+                ):
                     continue
                 message = (
                     f"اجرای آپلود تمام شد؛ پردازش: {payload['processed']}، "

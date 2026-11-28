@@ -269,35 +269,25 @@ def _prepare_pargar_candidate(path: Path) -> dict:
     if digest != expected_hash.lower():
         raise PargarError("SHA-256 بسته با package داخل CMF تطبیق ندارد.")
 
-    required_fields = {
-        "notice_no": "شماره ابلاغیه",
-        "web_datetime": "تاریخ ثبت",
-        "issuer_unit_name": "مرجع",
-        "subject_type": "موضوع ابلاغیه",
-    }
     values = {}
-    for field, label in required_fields.items():
+    for field in ("notice_no", "web_datetime", "issuer_unit_name", "subject_type"):
         value = manifest.get(field)
-        if not isinstance(value, str) or not value.strip():
-            raise PargarError(f"{label} در CMF معتبر نیست.")
-        values[field] = value.strip()
-    registration_date = values["web_datetime"].split("-", 1)[0].strip()
-    if not registration_date:
-        raise PargarError("تاریخ ثبت در CMF معتبر نیست.")
+        values[field] = value.strip() if isinstance(value, str) else ""
+    registration_date = values["web_datetime"].split("-", 1)[0].strip() or "ثبت نشده"
 
     parties = manifest.get("parties")
-    if not isinstance(parties, list) or not parties:
-        raise PargarError("نام طرف در CMF وجود ندارد.")
+    if not isinstance(parties, list):
+        parties = []
     party_names = []
     for party in parties:
         name = party.get("name") if isinstance(party, dict) else None
-        if not isinstance(name, str) or not name.strip():
-            raise PargarError("نام یکی از طرف‌ها در CMF معتبر نیست.")
-        party_names.append(name.strip())
+        if isinstance(name, str) and name.strip():
+            party_names.append(name.strip())
+    parties_text = "، ".join(party_names) or "ثبت نشده"
     subject = (
-        f"ابلاغیه شماره {values['notice_no']} با تاریخ ثبت {registration_date} "
-        f"مرجع {values['issuer_unit_name']} موضوع {values['subject_type']} "
-        f"طرف : {'، '.join(party_names)}"
+        f"ابلاغیه شماره {values['notice_no'] or 'ثبت نشده'} با تاریخ ثبت {registration_date} "
+        f"مرجع {values['issuer_unit_name'] or 'ثبت نشده'} موضوع {values['subject_type'] or 'ثبت نشده'} "
+        f"طرف : {parties_text}"
     )
     if len(manifest_text) > MAX_PARGAR_BODY_CHARS:
         body = manifest_text[:MAX_PARGAR_BODY_CHARS - len(CMF_TRUNCATION_MARKER)] + CMF_TRUNCATION_MARKER
@@ -341,16 +331,20 @@ def inspect_pargar_folder(folder: Path) -> dict:
     return summary
 
 
-def list_pargar_history(data_dir: Path) -> list[tuple]:
+def list_pargar_history(data_dir: Path, *, clear=False) -> list[tuple]:
     """Return Pargar-only delivery history, newest first."""
     database_path = Path(data_dir) / "pargar-state.sqlite3"
     if not database_path.is_file():
         return []
     db = _state_db(database_path)
     try:
+        if clear:
+            with db:
+                db.execute("INSERT OR IGNORE INTO hidden_pargar_history SELECT hash FROM messages")
         return list(db.execute(
             "SELECT notice_id,source_path,status,mail_id,detail,updated_at "
-            "FROM messages ORDER BY updated_at DESC"
+            "FROM messages WHERE hash NOT IN (SELECT hash FROM hidden_pargar_history) "
+            "ORDER BY updated_at DESC"
         ))
     finally:
         db.close()
@@ -369,6 +363,7 @@ def _state_db(path: Path):
         "CREATE UNIQUE INDEX IF NOT EXISTS messages_notice_hash "
         "ON messages(notice_id, hash) WHERE notice_id IS NOT NULL"
     )
+    connection.execute("CREATE TABLE IF NOT EXISTS hidden_pargar_history (hash TEXT PRIMARY KEY)")
     connection.commit()
     return connection
 
