@@ -45,6 +45,14 @@ TRANSFER_PREFIXES = {
     "thinclient": "__FT_TC__",
     "intranet": "__FT_IN__",
 }
+CMF_TRANSFER_PREFIXES = {
+    "thinclient": "__FT_TC_CMF__",
+    "intranet": "__FT_IN_CMF__",
+}
+RESERVED_TRANSFER_PREFIXES = (
+    *TRANSFER_PREFIXES.values(),
+    *CMF_TRANSFER_PREFIXES.values(),
+)
 
 
 def validate_environment(environment: str) -> str:
@@ -62,27 +70,37 @@ def tagged_transfer_name(name: str, environment: str) -> str:
     validate_environment(environment)
     if Path(name).name != name or not name:
         raise ValueError("نام فایل برای انتقال معتبر نیست.")
-    if any(name.startswith(prefix) for prefix in TRANSFER_PREFIXES.values()):
+    if name.startswith(RESERVED_TRANSFER_PREFIXES):
         raise ValueError("نام فایل از نشان رزروشده انتقال استفاده می‌کند.")
+    if Path(name).suffix.lower() == ".cmf":
+        return CMF_TRANSFER_PREFIXES[environment] + str(Path(name).with_suffix(".txt"))
     return TRANSFER_PREFIXES[environment] + name
 
 
 def parse_transfer_name(name: str) -> tuple[str, str] | None:
     if Path(name).name != name:
         return None
-    for environment, prefix in TRANSFER_PREFIXES.items():
-        if name.startswith(prefix):
+    transfer_types = (
+        (TRANSFER_PREFIXES, False),
+        (CMF_TRANSFER_PREFIXES, True),
+    )
+    for prefixes, restore_cmf in transfer_types:
+        for environment, prefix in prefixes.items():
+            if not name.startswith(prefix):
+                continue
             original = name[len(prefix) :]
             if (
-                original
-                and original not in {".", ".."}
-                and Path(original).name == original
-                and not any(
-                    original.startswith(other) for other in TRANSFER_PREFIXES.values()
-                )
+                not original
+                or original in {".", ".."}
+                or Path(original).name != original
+                or original.startswith(RESERVED_TRANSFER_PREFIXES)
             ):
-                return environment, original
-            return None
+                return None
+            if restore_cmf:
+                if Path(original).suffix != ".txt":
+                    return None
+                original = str(Path(original).with_suffix(".cmf"))
+            return environment, original
     return None
 
 
